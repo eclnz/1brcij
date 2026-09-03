@@ -48,10 +48,11 @@ pure arithmetic and each thread repairs its own boundary by skipping to the next
 row; a segment's stop is the *same function* applied to the next segment, so
 neighbours agree by construction and every row is processed exactly once.
 
-**SWAR scanning and hashing in one pass.** `';'` is located by
-`(x - ONES) & ~x & HIGHS` over an 8-byte load, and the name is folded into an
-FNV-1a hash in the same loop — the name bytes are read once and no `String` is
-ever built.
+**Scanning and hashing in one pass.** One 16-byte `vpcmpeqb` locates `';'` for
+any name under 16 bytes, which is 95% of the station set; longer names fall back
+to SWAR, `(x - ONES) & ~x & HIGHS` a word at a time. Either way the name is
+folded into an FNV-1a hash in the same pass, so its bytes are read once and no
+`String` is ever built.
 
 **Branchless parsing.** One 8-byte load covers `d.d\n` through `-dd.d\n`; a
 fixed sequence of ALU ops extracts the value with no branches (the merykitty
@@ -171,23 +172,36 @@ input and added back, because multiplying them by the scale factor is how a
 ## The actual challenge
 
 1 000 000 000 rows, 13 795 448 352 bytes, from a RAM disk, end to end with
-process startup counted, trimmed mean of ten runs — the 1BRC methodology, on
-four cores rather than the official eight:
+process startup counted, four cores. Every version rebuilt from git and timed
+back to back in one session — the input on 2 MiB pages except where stated:
 
-| | |
-|--:|:--|
-| **2.79 s** | trimmed mean (± 0.017 s over ten runs) |
-| 357 M rows/s | end to end |
-| 0.195 s | of that is fixed startup |
+| version | time | |
+|:--|--:|--:|
+| original implementation, 4 KiB pages | 6.445 s | |
+| original implementation | 6.314 s | |
+| + precompiled package image | 5.206 s | −17.5% |
+| + one cache line per entry | 4.674 s | −10.2% |
+| + 32768 slots | 4.797 s | +2.6% |
+| + 16-byte inline key | 4.299 s | −10.4% |
+| + pipelined prefetch | 4.216 s | −1.9% |
+| + five scan cursors | 4.026 s | −4.5% |
+| + SIMD delimiter scan | 3.174 s | −21.2% |
+| + 32-byte hot entry | 3.086 s | −2.8% |
+| **HEAD, 2 MiB pages** | **3.096 s** | |
+| HEAD, 4 KiB pages | 3.408 s | +10.1% |
 
-For reference, the official leaderboard's winning entry ran 1.535 s on eight
-cores of a 32-core EPYC 7502P, and its sequential Java baseline 4:49.679.
+**6.445 s → 3.096 s, 2.08× end to end, 323 M rows/s.**
 
-Everything below was measured at 1e8 rows and extrapolated ×10. Against this
-run that extrapolation came out 9.7% optimistic — 2.56 s predicted, 2.80 s
-measured — which is about what you would expect from TLB and page-table
-pressure appearing only at the real size. Close enough that the smaller
-measurements were worth trusting, and far enough to be worth saying.
+The 32768-slot row going the wrong way is not an error: that change was measured
+as neutral on the 413-station set and worth 11% at 10 000 stations, and this is
+the 413-station input the reference generator produces. Several of the changes
+above are worth two to four times more on the station count the spec permits.
+The SIMD scan is the exception, and the only one that reduces work per row
+rather than misses per row.
+
+Absolute times still move about 20% between sessions on this shared VM, so the
+table is internally consistent and not comparable to any other run here. An
+earlier session measured HEAD at 2.514 s on the same input and configuration.
 
 ### Thread scaling
 
