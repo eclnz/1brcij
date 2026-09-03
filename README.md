@@ -164,17 +164,19 @@ one worth reading as a progression:
 
 | version | 413 stations | 10 000 stations |
 |:--|--:|--:|
-| original — struct-of-arrays, 131072 slots, key by offset | 0.502 s | 1.058 s |
-| + one cache line per entry | 0.450 s | 0.775 s |
-| + 32768 slots | 0.439 s | 0.686 s |
-| + 16-byte inline key | 0.396 s | 0.555 s |
-| + pipelined prefetch | **0.385 s** | **0.534 s** |
-| | **1.30× faster** | **1.98× faster** |
+| original — struct-of-arrays, 131072 slots, key by offset | 0.397 s | 0.986 s |
+| + one cache line per entry | 0.363 s | 0.551 s |
+| + 32768 slots | 0.369 s | 0.546 s |
+| + 16-byte inline key | 0.340 s | 0.471 s |
+| + pipelined prefetch | 0.321 s | 0.429 s |
+| + five scan cursors | **0.306 s** | **0.407 s** |
+| | **1.30× faster** | **2.42× faster** |
 
-Nearly 2× on the case the spec permits, and about 1.3× on the case the
-reference generator actually produces. The gap between those two columns is the
-whole story of this repo: every change below targets cache behaviour, and cache
-behaviour only bites once there are enough distinct stations to spill.
+Nearly 2.5× on the case the spec permits, and 1.3× on the case the reference
+generator actually produces. The gap between those two columns is the whole
+story of this repo: every change below targets memory behaviour, and memory
+behaviour only bites once there are enough distinct stations to spill out of
+cache. Individual rows are noisy — read the endpoints.
 
 ### Absolute times mean very little here
 
@@ -201,6 +203,12 @@ Measured as its own A/B, each arm run back to back:
 | 32768 slots | −2% | −11% |
 | 16-byte inline key | −10% | −19% |
 | pipelined prefetch | −3% | −4% |
+| five scan cursors instead of three | −4% | −3% |
+
+Each was measured as its own A/B at four threads. Beware single-threaded
+microbenchmarks for the last two: both hide memory latency, and on one core
+there is far more latency to hide, so they read −10% and −16% there against the
+−3 to −4% they actually deliver.
 
 ### Cache lines, not probe counts
 
