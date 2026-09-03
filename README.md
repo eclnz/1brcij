@@ -164,19 +164,22 @@ one worth reading as a progression:
 
 | version | 413 stations | 10 000 stations |
 |:--|--:|--:|
-| original — struct-of-arrays, 131072 slots, key by offset | 0.397 s | 0.986 s |
-| + one cache line per entry | 0.363 s | 0.551 s |
-| + 32768 slots | 0.369 s | 0.546 s |
-| + 16-byte inline key | 0.340 s | 0.471 s |
-| + pipelined prefetch | 0.321 s | 0.429 s |
-| + five scan cursors | **0.306 s** | **0.407 s** |
-| | **1.30× faster** | **2.42× faster** |
+| original — struct-of-arrays, 131072 slots, key by offset | 0.401 s | 0.991 s |
+| + one cache line per entry | 0.369 s | 0.540 s |
+| + 32768 slots | 0.366 s | 0.544 s |
+| + 16-byte inline key | 0.337 s | 0.481 s |
+| + pipelined prefetch | 0.329 s | 0.447 s |
+| + five scan cursors | 0.305 s | 0.410 s |
+| + SIMD delimiter scan | **0.246 s** | **0.361 s** |
+| | **1.63× faster** | **2.75× faster** |
 
-Nearly 2.5× on the case the spec permits, and 1.3× on the case the reference
-generator actually produces. The gap between those two columns is the whole
-story of this repo: every change below targets memory behaviour, and memory
-behaviour only bites once there are enough distinct stations to spill out of
-cache. Individual rows are noisy — read the endpoints.
+Nearly 2.8× on the case the spec permits, 1.6× on the case the reference
+generator actually produces. Everything up to the last row targets memory
+behaviour, which only bites once there are enough distinct stations to spill out
+of cache — hence the gap between the columns. The SIMD scan is the first change
+that reduces work per row rather than misses per row, which is why it is the
+only one that pays as well at 413 stations as at 10 000. Individual rows are
+noisy; read the endpoints.
 
 ### Absolute times mean very little here
 
@@ -204,11 +207,32 @@ Measured as its own A/B, each arm run back to back:
 | 16-byte inline key | −10% | −19% |
 | pipelined prefetch | −3% | −4% |
 | five scan cursors instead of three | −4% | −3% |
+| SIMD delimiter scan | −19% | −14% |
 
 Each was measured as its own A/B at four threads. Beware single-threaded
 microbenchmarks for the last two: both hide memory latency, and on one core
 there is far more latency to hide, so they read −10% and −16% there against the
 −3 to −4% they actually deliver.
+
+### One vector compare instead of two SWAR words
+
+`scan_name` used SWAR to find `';'` a word at a time: one 8-byte sequence for a
+short name, two for a longer one, with a branch between them. A single
+`vpcmpeqb` compares all 16 bytes at once and yields a mask whose trailing zero
+count *is* the name length, so both cases collapse into one branchless path and
+the key masking falls out of the same number.
+
+| | 413 stations | 10 000 stations |
+|:--|--:|--:|
+| SWAR, word at a time | 0.307 s | 0.414 s |
+| **one 16-byte vector compare** | **0.249 s** | **0.358 s** |
+| | **−18.8%** | **−13.5%** |
+
+The same trick applied to the table's key comparison is a **regression** —
++5.6% and +7.1%. Two scalar compares short-circuit on the first mismatch and
+need no register moves; moving `k0`/`k1` into a vector register costs more than
+the compare saves. Same instruction, opposite result, which is why both sites
+were measured rather than one being inferred from the other.
 
 ### Cache lines, not probe counts
 

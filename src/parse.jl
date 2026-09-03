@@ -13,6 +13,52 @@ const NEWLINE = 0x0a
 const SEMICOLON = 0x3b
 
 """
+    match16(p, c) -> UInt32
+
+Bytewise compare of the 16 bytes at `p` against `c`, as a 16-bit mask. One
+`vpcmpeqb` where the SWAR path needs two word-at-a-time sequences.
+"""
+@inline function match16(p::Ptr{UInt8}, c::UInt8)
+    Base.llvmcall(("""
+        define i32 @entry(i64 %p, i8 %c) #0 {
+            %ptr = inttoptr i64 %p to ptr
+            %v = load <16 x i8>, ptr %ptr, align 1
+            %s0 = insertelement <16 x i8> undef, i8 %c, i32 0
+            %sp = shufflevector <16 x i8> %s0, <16 x i8> undef, <16 x i32> zeroinitializer
+            %e = icmp eq <16 x i8> %v, %sp
+            %m = bitcast <16 x i1> %e to i16
+            %r = zext i16 %m to i32
+            ret i32 %r
+        }
+        attributes #0 = { alwaysinline }
+        """, "entry"), UInt32, Tuple{UInt64, UInt8}, UInt64(p), c)
+end
+
+"""
+    eq2x64(p, a, b) -> Bool
+
+Are the two 64-bit words at `p` equal to `a` and `b`? One vector compare
+instead of two scalar ones.
+"""
+@inline function eq2x64(p::Ptr{UInt8}, a::UInt64, b::UInt64)
+    Base.llvmcall(("""
+        define i8 @entry(i64 %p, i64 %a, i64 %b) #0 {
+            %ptr = inttoptr i64 %p to ptr
+            %v = load <2 x i64>, ptr %ptr, align 8
+            %k0 = insertelement <2 x i64> undef, i64 %a, i32 0
+            %k1 = insertelement <2 x i64> %k0, i64 %b, i32 1
+            %e = icmp eq <2 x i64> %v, %k1
+            %m = bitcast <2 x i1> %e to i2
+            %f = icmp eq i2 %m, 3
+            %r = zext i1 %f to i8
+            ret i8 %r
+        }
+        attributes #0 = { alwaysinline }
+        """, "entry"), Bool, Tuple{UInt64, UInt64, UInt64}, UInt64(p), a, b)
+end
+
+
+"""
     match_bytes(word, pattern) -> UInt64
 
 Set 0x80 in each byte lane of `word` equal to `pattern`. `trailing_zeros(m) >> 3`
@@ -51,26 +97,19 @@ costs 0.05 probes per insert against 5.23 for the raw low bits.
 Locate and hash the name in one pass. `key0`/`key1` are its first 16 bytes
 masked to length, which is what the table compares against.
 
-The one- and two-word cases are written out because they cover 95% of the
-station set and avoid the loop's serial multiply chain.
+One 16-byte vector compare finds the delimiter for any name under 16 bytes,
+which is 95% of the station set, and the masking is branchless from there.
 """
 @inline function scan_name(base::Ptr{UInt8}, pos::Int)
+    m = match16(base + pos, SEMICOLON)
     w0 = unsafe_load(Ptr{UInt64}(base + pos))
-    m0 = match_bytes(w0, SEMIS)
-    if m0 != 0                                    # 0..7 bytes
-        n = trailing_zeros(m0) >> 3
-        k0 = w0 & tail_mask(n)
-        return finalize_hash(mix(HASH_BASIS, k0)), pos + n, k0, UInt64(0)
-    end
-
     w1 = unsafe_load(Ptr{UInt64}(base + pos + 8))
-    m1 = match_bytes(w1, SEMIS)
-    if m1 != 0                                    # 8..15 bytes
-        n = trailing_zeros(m1) >> 3
-        k1 = w1 & tail_mask(n)
-        return finalize_hash(mix(mix(HASH_BASIS, w0), k1)), pos + 8 + n, w0, k1
+    if m != 0
+        n = Int(trailing_zeros(m))
+        k0 = w0 & tail_mask(ifelse(n > 8, 8, n))
+        k1 = w1 & tail_mask(ifelse(n > 8, n - 8, 0))
+        return finalize_hash(mix(mix(HASH_BASIS, k0), k1)), pos + n, k0, k1
     end
-
     return scan_name_long(base, pos, w0, w1)
 end
 
