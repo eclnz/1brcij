@@ -189,6 +189,43 @@ measured — which is about what you would expect from TLB and page-table
 pressure appearing only at the real size. Close enough that the smaller
 measurements were worth trusting, and far enough to be worth saying.
 
+### Huge pages, which are a mount option and not code
+
+At 1e9 rows the input is 3.4 million 4 KiB pages, and every run faults them all
+in. Backing it with 2 MiB pages instead is worth **10%**, measured back to back
+on one machine with only the mount option differing:
+
+| | wall | system time |
+|:--|--:|--:|
+| 4 KiB pages | 2.807 s | 0.779 s |
+| **2 MiB pages** | **2.514 s** | **0.144 s** |
+
+User time is unchanged at 9.15 s — the work is identical, and the whole
+difference is kernel time faulting pages in, plus better TLB coverage during the
+scan.
+
+It also explains the extrapolation gap above. Predicting 1e9 from 1e8 gave
+2.56 s; on 4 KiB pages the real run came in 9.9% over that, and on huge pages
+1.6% under. The shortfall was page-table overhead all along.
+
+Two things make this a deployment note rather than a patch:
+
+* **`madvise` cannot do it.** `MADV_HUGEPAGE` on the mapping returns success and
+  changes nothing, because the kernel will not promote tmpfs pages already
+  allocated at 4 KiB. The setting has to be in place *before* the file is
+  written. `MADV_WILLNEED` is likewise flat, and `MADV_POPULATE_READ` is 6.8%
+  *slower* — it serialises page-table population into one syscall where the
+  ordinary fault path spreads it across every thread.
+* **The sysfs knob is not enough either.** `transparent_hugepage/shmem_enabled`
+  at `within_size` or `always` still yields zero huge pages; tmpfs needs the
+  mount option:
+
+```bash
+sudo mount -o remount,huge=always /dev/shm    # then regenerate the input
+```
+
+`create_measurements.sh` checks for it and says so before generating.
+
 ## Numbers
 
 Every version, built from git and timed back to back on one machine — 1e8 rows

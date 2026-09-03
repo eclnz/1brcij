@@ -51,6 +51,14 @@ if [ "$need_mb" -gt "$free_mb" ]; then
   exit 1
 fi
 
+if ! grep -q " $RAMDISK .*huge=" /proc/mounts 2>/dev/null; then
+  say ""
+  say "  note: no huge= mount option on $RAMDISK. Backing the input with 2 MiB"
+  say "        pages is worth about 10% at 1e9 rows, and must be set before the"
+  say "        file is written:"
+  say "            sudo mount -o remount,huge=always $RAMDISK"
+fi
+
 if [ -f /sys/devices/system/cpu/smt/active ] && [ "$(cat /sys/devices/system/cpu/smt/active)" != "0" ]; then
   say ""
   say "  note: SMT is on. 1BRC evaluated with it off; it adds variance here."
