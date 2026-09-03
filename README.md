@@ -123,6 +123,38 @@ The official evaluation is deliberately not a cold-file measurement. From the
 including `measurements-rounding` and `measurements-10000-unique-keys`,
 normalising both sides through 1BRC's own `tocsv.sh`. All twelve pass.
 
+## Running the real thing
+
+Prerequisites: `julia` (1.10+) on `PATH`, plus `hyperfine`, `jq` and `numactl`.
+Set `JULIA=/path/to/julia` if it is not on `PATH`.
+
+```bash
+./prepare.sh                          # precompile; do this after every source change
+./create_measurements.sh 1000000000   # ~2.5 min, writes 13.8 GB to /dev/shm
+BRC_CORES=0-7 ./evaluate.sh 10        # 8 cores, exactly as 1BRC evaluated
+```
+
+`/dev/shm` defaults to half of RAM, so the full 1e9 input needs a machine with
+about 28 GB, or an enlarged RAM disk:
+
+```bash
+sudo mount -o remount,size=16G /dev/shm
+```
+
+`create_measurements.sh` refuses to start a run that will not fit rather than
+filling the RAM disk and failing near the end. If yours is too small, pass a
+smaller row count — `evaluate.sh` will extrapolate and say so.
+
+Two knobs: `BRC_CORES` (default: every core) sets the `numactl --physcpubind`
+range, and `BRC_THREADS` (default: as many as there are pinned cores) sets
+Julia's thread count. 1BRC also ran with SMT disabled; `evaluate.sh` warns if it
+is on, since it adds variance rather than throughput here.
+
+The reported estimate scales only the part that grows with the row count.
+Process startup and thread setup are measured separately against a one-row
+input and added back, because multiplying them by the scale factor is how a
+1e8 run gets mistaken for a much slower 1e9 one.
+
 ## Numbers
 
 End-to-end on 4 cores, 1e8 rows from `/dev/shm`, trimmed mean of 15 runs:
