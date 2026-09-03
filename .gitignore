@@ -1,0 +1,4 @@
+measurements*.txt
+build/
+*.mem
+Manifest.toml
