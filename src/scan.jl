@@ -1,7 +1,7 @@
 # Segmentation, work queue, and the per-thread scan.
 
 const SEGMENT_SIZE = 1 << 21      # 2 MiB: balances without losing prefetch
-const STREAMS = 3
+const STREAMS = 5                 # swept 1..8; 4..6 tie, 7+ spills
 const MIN_STREAM_BYTES = 1 << 14  # below this a segment is scanned serially
 
 """
@@ -110,12 +110,15 @@ one long dependency chain and every cache miss stalls everything behind it.
 independent chains to overlap, while each still reads sequentially. The cursors
 are plain locals so they stay in registers.
 
-The loop is pipelined — hash all three streams and prefetch their entries, then
-parse and accumulate all three — so each prefetch has two further rows of work
-in front of it. That distance is the whole point: prefetching immediately before
+The loop is pipelined — hash every stream and prefetch its entry, then parse
+and accumulate them all — so each prefetch has four further rows of work in
+front of it. That distance is the whole point: prefetching immediately before
 the probe leaves only `parse_value` to cover the miss and measures flat, and
-pipelining without the prefetch measures flat too. Together they are worth ~10%
-at 10 000 stations, where the table stops fitting in cache.
+pipelining without the prefetch measures flat too.
+
+`STREAMS` therefore sets the prefetch distance as well as the number of
+independent chains, which is why 5 beats the 3 that suffices for ILP alone.
+Changing it means editing the unrolled body below.
 """
 function process_segment!(t::Table, base::Ptr{UInt8}, a::Int, b::Int)
     if b - a < STREAMS * MIN_STREAM_BYTES
@@ -123,21 +126,29 @@ function process_segment!(t::Table, base::Ptr{UInt8}, a::Int, b::Int)
     end
     span = b - a
     p1 = a
-    p2 = next_row_start(base, a + span ÷ 3, b)
-    p3 = next_row_start(base, a + (2 * span) ÷ 3, b)
-    e1, e2, e3 = p2, p3, b
+    p2 = next_row_start(base, a + span ÷ 5, b)
+    p3 = next_row_start(base, a + (2 * span) ÷ 5, b)
+    p4 = next_row_start(base, a + (3 * span) ÷ 5, b)
+    p5 = next_row_start(base, a + (4 * span) ÷ 5, b)
+    e1, e2, e3, e4, e5 = p2, p3, p4, p5, b
 
-    while p1 < e1 && p2 < e2 && p3 < e3
+    while p1 < e1 && p2 < e2 && p3 < e3 && p4 < e4 && p5 < e5
         h1, n1, a1, b1 = scan_name(base, p1); prefetch(slot(t, h1))
         h2, n2, a2, b2 = scan_name(base, p2); prefetch(slot(t, h2))
         h3, n3, a3, b3 = scan_name(base, p3); prefetch(slot(t, h3))
+        h4, n4, a4, b4 = scan_name(base, p4); prefetch(slot(t, h4))
+        h5, n5, a5, b5 = scan_name(base, p5); prefetch(slot(t, h5))
         p1 = finish_row!(t, base, p1, h1, n1, a1, b1)
         p2 = finish_row!(t, base, p2, h2, n2, a2, b2)
         p3 = finish_row!(t, base, p3, h3, n3, a3, b3)
+        p4 = finish_row!(t, base, p4, h4, n4, a4, b4)
+        p5 = finish_row!(t, base, p5, h5, n5, a5, b5)
     end
     scan_serial!(t, base, p1, e1)
     scan_serial!(t, base, p2, e2)
     scan_serial!(t, base, p3, e3)
+    scan_serial!(t, base, p4, e4)
+    scan_serial!(t, base, p5, e5)
     return nothing
 end
 
