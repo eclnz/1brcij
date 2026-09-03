@@ -1,7 +1,10 @@
 # Segmentation, work queue, and the per-thread scan.
 
+using Base.Cartesian: @nexprs, @nall
+
 const SEGMENT_SIZE = 1 << 21      # 2 MiB: balances without losing prefetch
 const STREAMS = 5                 # swept 1..8; 4..6 tie, 7+ spills
+@assert STREAMS == 5   # process_segment! unrolls this many cursors by hand
 const MIN_STREAM_BYTES = 1 << 14  # below this a segment is scanned serially
 
 """
@@ -125,30 +128,24 @@ function process_segment!(t::Table, base::Ptr{UInt8}, a::Int, b::Int)
         return scan_serial!(t, base, a, b)
     end
     span = b - a
-    p1 = a
-    p2 = next_row_start(base, a + span ÷ 5, b)
-    p3 = next_row_start(base, a + (2 * span) ÷ 5, b)
-    p4 = next_row_start(base, a + (3 * span) ÷ 5, b)
-    p5 = next_row_start(base, a + (4 * span) ÷ 5, b)
-    e1, e2, e3, e4, e5 = p2, p3, p4, p5, b
+    starts = ntuple(k -> k == 1 ? a : next_row_start(base, a + (k - 1) * span ÷ STREAMS, b),
+                    Val(STREAMS))
 
-    while p1 < e1 && p2 < e2 && p3 < e3 && p4 < e4 && p5 < e5
-        h1, n1, a1, b1 = scan_name(base, p1); prefetch(slot(t, h1))
-        h2, n2, a2, b2 = scan_name(base, p2); prefetch(slot(t, h2))
-        h3, n3, a3, b3 = scan_name(base, p3); prefetch(slot(t, h3))
-        h4, n4, a4, b4 = scan_name(base, p4); prefetch(slot(t, h4))
-        h5, n5, a5, b5 = scan_name(base, p5); prefetch(slot(t, h5))
-        p1 = finish_row!(t, base, p1, h1, n1, a1, b1)
-        p2 = finish_row!(t, base, p2, h2, n2, a2, b2)
-        p3 = finish_row!(t, base, p3, h3, n3, a3, b3)
-        p4 = finish_row!(t, base, p4, h4, n4, a4, b4)
-        p5 = finish_row!(t, base, p5, h5, n5, a5, b5)
+    # `@nexprs` needs a literal count, so the 5s below must match STREAMS; the
+    # check above the function keeps them in step. Unrolling into plain locals
+    # rather than looping over a container is what keeps the cursors in
+    # registers, which the whole design depends on.
+    @nexprs 5 k -> p_k = starts[k]
+    @nexprs 5 k -> e_k = (k == 5 ? b : starts[k + 1])
+
+    while @nall 5 k -> (p_k < e_k)
+        @nexprs 5 k -> begin
+            r_k = scan_name(base, p_k)
+            prefetch(slot(t, r_k[1]))
+        end
+        @nexprs 5 k -> (p_k = finish_row!(t, base, p_k, r_k[1], r_k[2], r_k[3], r_k[4]))
     end
-    scan_serial!(t, base, p1, e1)
-    scan_serial!(t, base, p2, e2)
-    scan_serial!(t, base, p3, e3)
-    scan_serial!(t, base, p4, e4)
-    scan_serial!(t, base, p5, e5)
+    @nexprs 5 k -> scan_serial!(t, base, p_k, e_k)
     return nothing
 end
 
