@@ -49,6 +49,39 @@ neighbouring threads agree by construction and every row is scanned once.
     return next_row_start(base, off, fend)
 end
 
+# Julia exposes no prefetch intrinsic, so this is hand-written LLVM IR and the
+# most fragile code here: `ptr` is LLVM's opaque pointer type and needs a
+# reasonably modern LLVM. Arguments are (address, write, locality, data cache).
+# It lowers to nothing on targets without a prefetch instruction, so it stays
+# portable; a write prefetch because the entry is read-modify-written.
+@inline function prefetch(p::Ptr)
+    Base.llvmcall(("""
+        declare void @llvm.prefetch.p0(ptr, i32, i32, i32)
+        define void @entry(i64 %p) #0 {
+            %ptr = inttoptr i64 %p to ptr
+            call void @llvm.prefetch.p0(ptr %ptr, i32 1, i32 3, i32 1)
+            ret void
+        }
+        attributes #0 = { alwaysinline }
+        """, "entry"), Cvoid, Tuple{UInt64}, UInt64(p))
+end
+
+@inline slot(t::Table, h::UInt64) = entry(t, Int(h & TABLE_MASK))
+
+"""
+    finish_row!(t, base, pos, h, nend, k0, k1) -> Int
+
+Second half of a row, once its name is scanned: parse the value, accumulate it,
+and return the offset of the next row.
+"""
+@inline function finish_row!(t::Table, base::Ptr{UInt8}, pos::Int,
+                             h::UInt64, nend::Int, k0::UInt64, k1::UInt64)
+    vstart = nend + 1
+    v, adv = parse_value(unsafe_load(Ptr{UInt64}(base + vstart)))
+    update!(t, base, h, pos, nend - pos, k0, k1, v)
+    return vstart + adv
+end
+
 """
     process_row!(t, base, pos) -> Int
 
@@ -56,10 +89,7 @@ Handle one `<name>;<value>\\n` row and return the offset of the next.
 """
 @inline function process_row!(t::Table, base::Ptr{UInt8}, pos::Int)
     h, nend, k0, k1 = scan_name(base, pos)
-    vstart = nend + 1
-    v, adv = parse_value(unsafe_load(Ptr{UInt64}(base + vstart)))
-    update!(t, base, h, pos, nend - pos, k0, k1, v)
-    return vstart + adv
+    return finish_row!(t, base, pos, h, nend, k0, k1)
 end
 
 @inline function scan_serial!(t::Table, base::Ptr{UInt8}, pos::Int, stop::Int)
@@ -79,6 +109,13 @@ one long dependency chain and every cache miss stalls everything behind it.
 `STREAMS` sub-ranges advanced round-robin give the out-of-order engine
 independent chains to overlap, while each still reads sequentially. The cursors
 are plain locals so they stay in registers.
+
+The loop is pipelined — hash all three streams and prefetch their entries, then
+parse and accumulate all three — so each prefetch has two further rows of work
+in front of it. That distance is the whole point: prefetching immediately before
+the probe leaves only `parse_value` to cover the miss and measures flat, and
+pipelining without the prefetch measures flat too. Together they are worth ~10%
+at 10 000 stations, where the table stops fitting in cache.
 """
 function process_segment!(t::Table, base::Ptr{UInt8}, a::Int, b::Int)
     if b - a < STREAMS * MIN_STREAM_BYTES
@@ -91,9 +128,12 @@ function process_segment!(t::Table, base::Ptr{UInt8}, a::Int, b::Int)
     e1, e2, e3 = p2, p3, b
 
     while p1 < e1 && p2 < e2 && p3 < e3
-        p1 = process_row!(t, base, p1)
-        p2 = process_row!(t, base, p2)
-        p3 = process_row!(t, base, p3)
+        h1, n1, a1, b1 = scan_name(base, p1); prefetch(slot(t, h1))
+        h2, n2, a2, b2 = scan_name(base, p2); prefetch(slot(t, h2))
+        h3, n3, a3, b3 = scan_name(base, p3); prefetch(slot(t, h3))
+        p1 = finish_row!(t, base, p1, h1, n1, a1, b1)
+        p2 = finish_row!(t, base, p2, h2, n2, a2, b2)
+        p3 = finish_row!(t, base, p3, h3, n3, a3, b3)
     end
     scan_serial!(t, base, p1, e1)
     scan_serial!(t, base, p2, e2)

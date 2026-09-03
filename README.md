@@ -161,16 +161,16 @@ End-to-end on 4 cores, 1e8 rows from `/dev/shm`, trimmed mean of 15 runs:
 
 | | |
 |--:|:--|
-| **0.674 s** | trimmed mean, end to end |
-| 148.3 M rows/s | end to end, startup included |
-| **4.97 s** | estimated for 1e9 rows |
+| **0.673 s** | trimmed mean, end to end |
+| 148.6 M rows/s | end to end, startup included |
+| **4.78 s** | estimated for 1e9 rows |
 
 Where that time goes:
 
 | | |
 |--:|:--|
-| 0.197 s | fixed — process startup, thread setup, table zeroing |
-| 0.477 s | scaling — the scan itself |
+| 0.216 s | fixed — process startup, thread setup, table zeroing |
+| 0.457 s | scaling — the scan itself |
 
 Only the scaling part is multiplied when estimating 1e9; `evaluate.sh` measures
 the fixed part against a one-row input rather than assuming it away.
@@ -189,6 +189,31 @@ one session and 0.723 s in another. Every table below is internally consistent
 — both arms measured back to back on the same host — but figures from different
 tables are not comparable, and none of them will match what you measure. Treat
 the percentages as the result and the absolute seconds as incidental.
+
+### Prefetch, but only with somewhere to hide
+
+The table probe is a data-dependent load, and at 10 000 stations it misses L2
+regularly. The obvious fix is to prefetch the entry as soon as the hash is
+known, so the miss overlaps `parse_value` instead of stalling after it. Measured
+on its own, that does nothing: ten cycles of ALU is not enough to cover the
+miss, and the extra instruction is not free.
+
+What works is prefetching *and* pipelining the loop — hash all three streams and
+issue all three prefetches, then parse and accumulate all three — which gives
+each prefetch two further rows of work in front of it. Neither half does
+anything alone:
+
+| scan loop, 1e7 rows, one thread | 413 stations | 10 000 stations |
+|:--|--:|--:|
+| prefetch only, no distance | +1.8% | −0.3% |
+| pipelined, no prefetch | ~0% | ~0% |
+| **pipelined and prefetching** | **−4%** | **−10%** |
+
+End to end at 1e8 rows that is 0.710 s → 0.659 s and 0.883 s → 0.805 s.
+
+Julia has no prefetch intrinsic, so `prefetch` in `scan.jl` is hand-written LLVM
+IR — the most fragile code in the repo, though `llvm.prefetch` lowers to nothing
+on targets without the instruction.
 
 ### The name never leaves the cache line
 
