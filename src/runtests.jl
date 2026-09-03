@@ -3,7 +3,7 @@ include(joinpath(@__DIR__, "..", "src", "OneBRC.jl"))
 using .OneBRC
 using Random
 using .OneBRC: match_bytes, tail_mask, scan_name, parse_value, parse_tenths,
-               Table, update!, merge_tables, Stat, combine, name_tail_eq, Name,
+               Table, update!, merge_tables, Stat, combine, name_tail_eq,
                fmt_tenths, round_tenths, format_result, fast_region_end,
                next_row_start, segment_start, SEGMENT_SIZE, TAIL_SLACK,
                accumulate_slow!, load_stations, generate, run_file
@@ -60,8 +60,7 @@ end
                  "Alexandra", "Alexandria", repeat("x", 99)]
         buf = Vector{UInt8}(codeunits(name * ";12.3\n"))
         append!(buf, zeros(UInt8, 16))
-        nm = GC.@preserve buf scan_name(pointer(buf), 0)
-        h, nend, k0, k1 = nm.hash, nm.stop, nm.key0, nm.key1
+        h, nend, k0, k1 = GC.@preserve buf scan_name(pointer(buf), 0)
         @test nend == length(codeunits(name))
         # the inline key must be the name's first 16 bytes, masked to length
         raw = Vector{UInt8}(codeunits(name)); append!(raw, zeros(UInt8, 16))
@@ -74,14 +73,14 @@ end
         # the hash must depend only on the name, not on what follows it
         buf2 = Vector{UInt8}(codeunits(name * ";-45.6\nZagreb;1.0\n"))
         append!(buf2, zeros(UInt8, 16))
-        nm2 = GC.@preserve buf2 scan_name(pointer(buf2), 0)
-        @test nm == nm2
+        h2, nend2, k02, k12 = GC.@preserve buf2 scan_name(pointer(buf2), 0)
+        @test (h, nend, k0, k1) == (h2, nend2, k02, k12)
     end
     # distinct names, distinct hashes, over the real station list
     names = [s.name for s in load_stations()]
     hs = map(names) do name
         buf = Vector{UInt8}(codeunits(name * ";0.0\n")); append!(buf, zeros(UInt8, 16))
-        GC.@preserve buf scan_name(pointer(buf), 0).hash
+        GC.@preserve buf first(scan_name(pointer(buf), 0))
     end
     @test length(unique(hs)) == length(names)
     # Collisions are expected and handled by probing; only a lot of them would
@@ -103,7 +102,7 @@ end
     total, worst = 0, 0
     for name in names
         buf = Vector{UInt8}(codeunits(name * ";0.0\n")); append!(buf, zeros(UInt8, 16))
-        h = GC.@preserve buf scan_name(pointer(buf), 0).hash
+        h = GC.@preserve buf first(scan_name(pointer(buf), 0))
         i = Int(h & OneBRC.TABLE_MASK) + 1
         d = 0
         while occupied[i]
@@ -242,9 +241,9 @@ end
             p = pointer(buf)
             pos = 0
             for _ in 1:n
-                nm = scan_name(p, pos)
-                update!(tbl, p, pos, nm, Int64(10))
-                pos = nm.stop + 6         # ";1.0\n"
+                h, nend, k0, k1 = scan_name(p, pos)
+                update!(tbl, p, h, pos, nend - pos, k0, k1, Int64(10))
+                pos = nend + 6            # ";1.0\n"
             end
         end
         return tbl

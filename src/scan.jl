@@ -72,16 +72,15 @@ end
 @inline slot(t::Table, h::UInt64) = entry(t, Int(h & TABLE_MASK))
 
 """
-    finish_row!(t, base, pos, h, nend, k0, k1) -> Int
+    finish_row!(t, base, pos, name) -> Int
 
 Second half of a row, once its name is scanned: parse the value, accumulate it,
 and return the offset of the next row.
 """
-@inline function finish_row!(t::Table, base::Ptr{UInt8}, pos::Int,
-                             h::UInt64, nend::Int, k0::UInt64, k1::UInt64)
-    vstart = nend + 1
+@inline function finish_row!(t::Table, base::Ptr{UInt8}, pos::Int, name::Name)
+    vstart = name.stop + 1
     v, adv = parse_value(unsafe_load(Ptr{UInt64}(base + vstart)))
-    update!(t, base, h, pos, nend - pos, k0, k1, v)
+    update!(t, base, pos, name, v)
     return vstart + adv
 end
 
@@ -91,8 +90,7 @@ end
 Handle one `<name>;<value>\\n` row and return the offset of the next.
 """
 @inline function process_row!(t::Table, base::Ptr{UInt8}, pos::Int)
-    h, nend, k0, k1 = scan_name(base, pos)
-    return finish_row!(t, base, pos, h, nend, k0, k1)
+    return finish_row!(t, base, pos, scan_name(base, pos))
 end
 
 @inline function scan_serial!(t::Table, base::Ptr{UInt8}, pos::Int, stop::Int)
@@ -140,10 +138,10 @@ function process_segment!(t::Table, base::Ptr{UInt8}, a::Int, b::Int)
 
     while @nall 5 k -> (p_k < e_k)
         @nexprs 5 k -> begin
-            r_k = scan_name(base, p_k)
-            prefetch(slot(t, r_k[1]))
+            name_k = scan_name(base, p_k)
+            prefetch(slot(t, name_k.hash))
         end
-        @nexprs 5 k -> (p_k = finish_row!(t, base, p_k, r_k[1], r_k[2], r_k[3], r_k[4]))
+        @nexprs 5 k -> (p_k = finish_row!(t, base, p_k, name_k))
     end
     @nexprs 5 k -> scan_serial!(t, base, p_k, e_k)
     return nothing

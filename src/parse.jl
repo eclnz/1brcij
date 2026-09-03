@@ -77,6 +77,20 @@ defines as 0 (unlike C), so there is no special case.
 """
 @inline tail_mask(nbytes::Int) = typemax(UInt64) >> (64 - 8 * nbytes)
 
+"""
+    Name
+
+A station name located in the mapping: its hash, the 0-based offset of the
+terminating `';'`, and its first 16 bytes masked to length. Immutable and
+isbits, so it lives in registers exactly as the tuple it replaced did.
+"""
+struct Name
+    hash::UInt64
+    stop::Int
+    key0::UInt64
+    key1::UInt64
+end
+
 const HASH_BASIS = 0xcbf29ce484222325
 const HASH_PRIME = 0x00000100000001b3   # odd, so the multiply stays invertible
 
@@ -92,9 +106,9 @@ costs 0.05 probes per insert against 5.23 for the raw low bits.
 @inline finalize_hash(h::UInt64) = h ⊻ (h >> 29)
 
 """
-    scan_name(base, pos) -> (hash, name_end, key0, key1)
+    scan_name(base, pos) -> Name
 
-Locate and hash the name in one pass. `key0`/`key1` are its first 16 bytes
+Locate and hash the name in one pass. The key words are its first 16 bytes
 masked to length, which is what the table compares against.
 
 One 16-byte vector compare finds the delimiter for any name under 16 bytes,
@@ -108,13 +122,13 @@ which is 95% of the station set, and the masking is branchless from there.
         n = Int(trailing_zeros(m))
         k0 = w0 & tail_mask(ifelse(n > 8, 8, n))
         k1 = w1 & tail_mask(ifelse(n > 8, n - 8, 0))
-        return finalize_hash(mix(mix(HASH_BASIS, k0), k1)), pos + n, k0, k1
+        return Name(finalize_hash(mix(mix(HASH_BASIS, k0), k1)), pos + n, k0, k1)
     end
     return scan_name_long(base, pos, w0, w1)
 end
 
 """
-    scan_name_long(base, pos, w0, w1) -> (hash, name_end, key0, key1)
+    scan_name_long(base, pos, w0, w1) -> Name
 
 Names of 16 bytes or more. `@noinline` keeps its loop out of the two paths above.
 """
@@ -127,7 +141,7 @@ Names of 16 bytes or more. `@noinline` keeps its loop out of the two paths above
         if m != 0
             n = trailing_zeros(m) >> 3
             h = mix(h, word & tail_mask(n))
-            return finalize_hash(h), p + n, w0, w1
+            return Name(finalize_hash(h), p + n, w0, w1)
         end
         h = mix(h, word)
         p += 8

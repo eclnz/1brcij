@@ -72,45 +72,70 @@ has already matched against the entry's inline key.
            (unsafe_load(Ptr{UInt64}(base + b + i)) & m)
 end
 
-"""
-    update!(t, base, h, noff, nlen, k0, k1, v)
+"""Is this slot unused? A count of zero can only mean untouched."""
+@inline slot_free(e::Ptr{UInt8}) = ld(Int32, e, O_CNT) == 0
 
-Insert or accumulate one row.
-
-A name under 16 bytes leaves a zero byte in `k1` from the masking, and station
-names contain no NUL, so a key match settles it: the stored name must carry the
-same zero byte and therefore the same length. Only a name of 16 bytes or more
-is ambiguous against a longer one sharing its first 16, and those consult the
-cold length and offset. That is what keeps the length out of the hot entry.
 """
-@inline function update!(t::Table, base::Ptr{UInt8}, h::UInt64,
-                         noff::Int, nlen::Int, k0::UInt64, k1::UInt64, v::Int64)
-    idx = Int(h & TABLE_MASK)
-    @inbounds while true
+    slot_matches(t, e, base, idx, pos, name) -> Bool
+
+Does this slot hold `name`?
+
+A name under 16 bytes leaves a zero byte in `key1` from the masking, and station
+names contain no NUL, so the inline key settles it: the stored name must carry
+the same zero byte and therefore the same length. Only a name of 16 bytes or
+more is ambiguous against a longer one sharing its first 16, and those consult
+the cold length and offset — which is what keeps the length out of the hot entry.
+"""
+@inline function slot_matches(t::Table, e::Ptr{UInt8}, base::Ptr{UInt8},
+                              idx::Int, pos::Int, name::Name)
+    ld(UInt64, e, O_KEY0) == name.key0 || return false
+    ld(UInt64, e, O_KEY1) == name.key1 || return false
+    nlen = name.stop - pos
+    nlen < INLINE_KEY_BYTES && return true
+    @inbounds return t.len[idx + 1] == Int32(nlen) &&
+                    name_tail_eq(base, t.off[idx + 1], pos, nlen)
+end
+
+"""Claim an empty slot for `name`, refusing to take the table past half full."""
+@inline function slot_claim!(t::Table, e::Ptr{UInt8}, idx::Int, pos::Int,
+                             name::Name, v::Int64)
+    n = t.nlive[] + 1              # once per station, not per row
+    n > MAX_ENTRIES && table_full()
+    t.nlive[] = n
+    st!(e, O_KEY0, name.key0)
+    st!(e, O_KEY1, name.key1)
+    st!(e, O_SUM, v)
+    st!(e, O_CNT, Int32(1))
+    st!(e, O_MIN, Int16(v))
+    st!(e, O_MAX, Int16(v))
+    @inbounds t.off[idx + 1] = pos
+    @inbounds t.len[idx + 1] = Int32(name.stop - pos)
+    return nothing
+end
+
+"""Fold one more reading into a slot that already holds this station."""
+@inline function slot_accumulate!(e::Ptr{UInt8}, v::Int64)
+    v16 = Int16(v)
+    v16 < ld(Int16, e, O_MIN) && st!(e, O_MIN, v16)
+    v16 > ld(Int16, e, O_MAX) && st!(e, O_MAX, v16)
+    st!(e, O_SUM, ld(Int64, e, O_SUM) + v)
+    st!(e, O_CNT, ld(Int32, e, O_CNT) + Int32(1))
+    return nothing
+end
+
+"""
+    update!(t, base, pos, name, v)
+
+Insert or accumulate one row, probing linearly from the hash.
+"""
+@inline function update!(t::Table, base::Ptr{UInt8}, pos::Int, name::Name, v::Int64)
+    idx = Int(name.hash & TABLE_MASK)
+    while true
         e = entry(t, idx)
-        if ld(Int32, e, O_CNT) == 0
-            n = t.nlive[] + 1          # once per station, not per row
-            n > MAX_ENTRIES && table_full()
-            t.nlive[] = n
-            st!(e, O_KEY0, k0)
-            st!(e, O_KEY1, k1)
-            st!(e, O_SUM, v)
-            st!(e, O_CNT, Int32(1))
-            st!(e, O_MIN, Int16(v))
-            st!(e, O_MAX, Int16(v))
-            t.off[idx + 1] = noff
-            t.len[idx + 1] = Int32(nlen)
-            return nothing
-        elseif ld(UInt64, e, O_KEY0) == k0 && ld(UInt64, e, O_KEY1) == k1 &&
-               (nlen < INLINE_KEY_BYTES ||
-                (t.len[idx + 1] == Int32(nlen) &&
-                 name_tail_eq(base, t.off[idx + 1], noff, nlen)))
-            v16 = Int16(v)
-            v16 < ld(Int16, e, O_MIN) && st!(e, O_MIN, v16)
-            v16 > ld(Int16, e, O_MAX) && st!(e, O_MAX, v16)
-            st!(e, O_SUM, ld(Int64, e, O_SUM) + v)
-            st!(e, O_CNT, ld(Int32, e, O_CNT) + Int32(1))
-            return nothing
+        if slot_free(e)
+            return slot_claim!(t, e, idx, pos, name, v)
+        elseif slot_matches(t, e, base, idx, pos, name)
+            return slot_accumulate!(e, v)
         end
         idx = (idx + 1) & Int(TABLE_MASK)    # power of two: mask, not branch
     end
