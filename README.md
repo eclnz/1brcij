@@ -33,6 +33,7 @@ written explicitly in the hot paths as well.
 | `test.sh` | correctness gate against the official samples |
 | `create_measurements.sh` | generate the input onto a RAM disk |
 | `evaluate.sh` | the 1BRC benchmark methodology (see below) |
+| `benchmark.sh` | all of the above in one command |
 
 ## What each layer does
 
@@ -125,14 +126,26 @@ normalising both sides through 1BRC's own `tocsv.sh`. All twelve pass.
 
 ## Running the real thing
 
-Prerequisites: `julia` (1.10+) on `PATH`, plus `hyperfine`, `jq` and `numactl`.
-Set `JULIA=/path/to/julia` if it is not on `PATH`.
+```bash
+./benchmark.sh
+```
+
+That checks prerequisites, precompiles, generates the 13.8 GB input onto a RAM
+disk and runs the evaluation, pinning to cores 0-7 where there are eight to
+match the official setup. Pass a smaller row count if the RAM disk cannot hold
+the full input — `./benchmark.sh 100000000` — and the harness extrapolates and
+says so.
+
+The steps it wraps, if you would rather drive them yourself:
 
 ```bash
 ./prepare.sh                          # precompile; do this after every source change
 ./create_measurements.sh 1000000000   # ~2.5 min, writes 13.8 GB to /dev/shm
 BRC_CORES=0-7 ./evaluate.sh 10        # 8 cores, exactly as 1BRC evaluated
 ```
+
+Prerequisites: `julia` (1.10+), `hyperfine`, `jq`, `numactl`, `bc`. Set
+`JULIA=/path/to/julia` if julia is not on `PATH`.
 
 `/dev/shm` defaults to half of RAM, so the full 1e9 input needs a machine with
 about 28 GB, or an enlarged RAM disk:
@@ -154,6 +167,27 @@ The reported estimate scales only the part that grows with the row count.
 Process startup and thread setup are measured separately against a one-row
 input and added back, because multiplying them by the scale factor is how a
 1e8 run gets mistaken for a much slower 1e9 one.
+
+## The actual challenge
+
+1 000 000 000 rows, 13 795 448 352 bytes, from a RAM disk, end to end with
+process startup counted, trimmed mean of ten runs — the 1BRC methodology, on
+four cores rather than the official eight:
+
+| | |
+|--:|:--|
+| **2.79 s** | trimmed mean (± 0.017 s over ten runs) |
+| 357 M rows/s | end to end |
+| 0.195 s | of that is fixed startup |
+
+For reference, the official leaderboard's winning entry ran 1.535 s on eight
+cores of a 32-core EPYC 7502P, and its sequential Java baseline 4:49.679.
+
+Everything below was measured at 1e8 rows and extrapolated ×10. Against this
+run that extrapolation came out 9.7% optimistic — 2.56 s predicted, 2.80 s
+measured — which is about what you would expect from TLB and page-table
+pressure appearing only at the real size. Close enough that the smaller
+measurements were worth trusting, and far enough to be worth saying.
 
 ## Numbers
 
