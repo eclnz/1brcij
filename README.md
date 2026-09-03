@@ -56,10 +56,10 @@ ever built.
 fixed sequence of ALU ops extracts the value with no branches (the merykitty
 trick). Everything stays in tenths of a degree as integers until printing.
 
-**Open addressing.** A fixed 131072-slot table (load factor < 0.08 at the
-challenge's 10 000-station cap), struct-of-arrays, with the key stored as an
-offset into the mapping rather than a copy. Names are compared in full, so the
-result is correct rather than probabilistically correct.
+**Open addressing.** A fixed 131072-slot table with the key stored as an offset
+into the mapping rather than a copy, and each entry packed into exactly one
+64-byte cache line. Names are compared in full, so the result is correct rather
+than probabilistically correct.
 
 **ILP.** Three independent cursors per segment, advanced round-robin, so the
 out-of-order engine has something to do while one stream misses cache.
@@ -125,31 +125,57 @@ normalising both sides through 1BRC's own `tocsv.sh`. All twelve pass.
 
 ## Numbers
 
-End-to-end on 4 cores, 1e8 rows from `/dev/shm`, trimmed mean of 10 runs:
+End-to-end on 4 cores, 1e8 rows from `/dev/shm`, trimmed mean of 15 runs:
 
 | | |
 |--:|:--|
-| **0.621 s** | trimmed mean, end to end |
-| 161 M rows/s | end to end, startup included |
-| **6.21 s** | extrapolated to 1e9 rows |
+| **0.573 s** | trimmed mean, end to end |
+| 174.5 M rows/s | end to end, startup included |
+| **5.73 s** | extrapolated to 1e9 rows |
 
 Where that time goes:
 
 | | |
 |--:|:--|
 | 0.174 s | process startup — Julia runtime plus the package image |
-| 0.355 s | the scan itself (282 M rows/s, 3.6 GiB/s) |
-| ~0.09 s | thread startup and zeroing 4 × 5.2 MB of thread-local tables |
+| ~0.31 s | the scan itself |
+| ~0.09 s | thread startup and zeroing the thread-local tables |
 
 Because 1BRC times the launch script rather than the aggregation, startup is
-worth optimising: `src/OneBRC.jl` ends with a precompilation workload that
-bakes the hot path's native code into the package image, which took the fixed
-cost of a run from **819 ms to 174 ms**. This is the same pressure that pushed
-the top JVM entries onto GraalVM native images.
+worth optimising the way the top JVM entries used GraalVM native images.
+`src/OneBRC.jl` ends with a precompilation workload that bakes the hot path's
+native code into the package image, which took the fixed cost of a run from
+**819 ms to 174 ms**.
 
-The 5.2 MB-per-thread table is the next thing that harness exposes and an
-in-process benchmark hides: `TABLE_BITS` is sized for the 10 000-station cap,
-and every fresh process pays to fault in and zero 21 MB of it.
+### Cache lines, not probe counts
+
+The table layout was the largest single win, and the reasoning that produced it
+was wrong twice over.
+
+The original design followed the usual advice: struct-of-arrays, sized for a
+load factor under 0.08 at the challenge's 10 000-station cap. Both choices
+optimise probe count. Probe count turned out not to be what costs — with seven
+parallel arrays, one row's update touches up to seven cache lines. Packing an
+entry into a single 64-byte line touches one.
+
+Measured end to end, 1e8 rows, 4 cores:
+
+| layout | `TABLE_BITS` | MiB/table | 413 stations | 10 000 stations |
+|:--|--:|--:|--:|--:|
+| struct-of-arrays | 17 | 5.0 | 0.595 s | 1.286 s |
+| struct-of-arrays | 15 | 1.25 | 0.598 s | 0.901 s |
+| **one cache line per entry** | 17 | 8.0 | 0.583 s | **0.860 s** |
+| one cache line per entry | 15 | 2.0 | 0.586 s | 0.763 s |
+
+The packed entry is *larger* — 64 bytes against 40 — and uses more memory per
+table, and is still 33% faster on the case the spec actually permits. That is
+the clearest evidence that the cost here is lines touched, not bytes held and
+not probes walked. The two fixes overlap rather than compound: together they
+are worth 41%, not the 63% adding them would suggest.
+
+At 413 stations, the station set the reference generator produces, every
+variant lands within the ±7% run-to-run noise of this machine. The whole effect
+lives in the case with enough distinct stations to spill out of cache.
 
 Scan throughput alone, measured in-process with `scripts/bench.jl`
 (compilation and startup excluded):
@@ -159,6 +185,9 @@ Scan throughput alone, measured in-process with `scripts/bench.jl`
 | 1 | 0.142 s (70 M rows/s) | |
 | 2 | 0.065 s (154 M rows/s) | |
 | 4 | 0.034 s (290 M rows/s) | 0.355 s (282 M rows/s) |
+
+(measured with the struct-of-arrays table; the packed layout changes the
+10 000-station case, not this one)
 
 Throughput holds as the file grows past cache, so the extrapolation to 1e9 is
 close to linear. The three ILP cursors are worth ~7% single-threaded and ~1% at

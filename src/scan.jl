@@ -139,7 +139,9 @@ function scan_parallel(base::Ptr{UInt8}, fend::Int)
         tasks[i] = let base = base, fend = fend, work = work
             Threads.@spawn begin
                 tbl = Table()
-                while (seg = claim!(work)) != 0
+                # The table is addressed through a raw pointer into its own
+                # backing array, so keep it preserved for the whole scan.
+                GC.@preserve tbl while (seg = claim!(work)) != 0
                     a = segment_start(base, seg, fend)
                     b = segment_start(base, seg + 1, fend)
                     process_segment!(tbl, base, a, b)

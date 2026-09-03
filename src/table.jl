@@ -6,7 +6,8 @@
 #
 #   * open addressing with linear probing over a fixed power-of-two table, so
 #     it never resizes (the challenge caps the station set at 10 000 names);
-#   * struct-of-arrays rather than array-of-structs;
+#   * one entry per 64-byte cache line (array-of-structs): an update touches
+#     one line rather than the seven a struct-of-arrays layout would;
 #   * the key is stored as an OFFSET INTO THE MMAP plus a length, so the name
 #     bytes are never copied.  The mapping outlives every table.
 #
@@ -17,23 +18,42 @@ const TABLE_BITS = 17
 const TABLE_SIZE = 1 << TABLE_BITS          # 131072 slots: load factor < 0.08
 const TABLE_MASK = UInt64(TABLE_SIZE - 1)
 
+# One entry occupies exactly one 64-byte cache line: seven Int64 fields and a
+# word of padding.  This is array-of-structs, not the struct-of-arrays layout
+# it replaces, and the reason is cache traffic — with seven parallel arrays a
+# single row's update touches up to seven different cache lines, where this
+# touches one.
+const ENTRY_WORDS = 8                     # Int64 slots per entry
+const ENTRY_BYTES = ENTRY_WORDS * 8       # == 64, one cache line
+const E_HASH = 0
+const E_OFF  = 1
+const E_LEN  = 2
+const E_MIN  = 3                          # all statistics are in tenths
+const E_MAX  = 4
+const E_SUM  = 5
+const E_CNT  = 6                          # 0 marks an empty slot
+# slot 7 is padding to fill the line
+
 struct Table
-    hash::Vector{UInt64}
-    off::Vector{Int}       # 0-based offset of the name into the mmap
-    len::Vector{Int32}
-    min::Vector{Int32}     # all statistics are in tenths of a degree
-    max::Vector{Int32}
-    sum::Vector{Int64}
-    cnt::Vector{Int32}
+    data::Vector{Int64}    # backing store, over-allocated by one entry
+    base::Ptr{Int64}       # 64-byte aligned pointer into `data`
 end
 
-Table() = Table(zeros(UInt64, TABLE_SIZE),
-                zeros(Int, TABLE_SIZE),
-                zeros(Int32, TABLE_SIZE),
-                fill(Int32(9999), TABLE_SIZE),
-                fill(Int32(-9999), TABLE_SIZE),
-                zeros(Int64, TABLE_SIZE),
-                zeros(Int32, TABLE_SIZE))
+function Table()
+    # Julia guarantees no particular alignment for array data, and an entry
+    # straddling two cache lines would defeat the whole point, so over-allocate
+    # by one entry and start at the next 64-byte boundary.
+    data = zeros(Int64, ENTRY_WORDS * (TABLE_SIZE + 1))
+    p = pointer(data)
+    pad = (-Int(UInt(p)) & (ENTRY_BYTES - 1)) ÷ 8
+    return Table(data, p + 8 * pad)
+end
+
+# `cnt == 0` is the empty marker and an insert writes min and max outright, so
+# zeroed memory is a valid empty table — there are no sentinels to fill in.
+@inline entry(t::Table, idx::Int) = t.base + idx * ENTRY_BYTES
+@inline field(e::Ptr{Int64}, f::Int) = unsafe_load(e + 8 * f)
+@inline setfield(e::Ptr{Int64}, f::Int, v::Int64) = unsafe_store!(e + 8 * f, v)
 
 """
     name_eq(base, a, b, len) -> Bool
@@ -67,26 +87,29 @@ are safe to index on directly.
 """
 @inline function update!(t::Table, base::Ptr{UInt8}, h::UInt64,
                          noff::Int, nlen::Int, v::Int64)
-    idx = Int(h & TABLE_MASK) + 1
-    @inbounds while true
-        if t.cnt[idx] == 0
-            t.hash[idx] = h
-            t.off[idx] = noff
-            t.len[idx] = Int32(nlen)
-            t.min[idx] = Int32(v)
-            t.max[idx] = Int32(v)
-            t.sum[idx] = v
-            t.cnt[idx] = Int32(1)
+    hi = reinterpret(Int64, h)
+    idx = Int(h & TABLE_MASK)
+    while true
+        e = entry(t, idx)
+        if field(e, E_CNT) == 0
+            setfield(e, E_HASH, hi)
+            setfield(e, E_OFF, noff)
+            setfield(e, E_LEN, nlen)
+            setfield(e, E_MIN, v)
+            setfield(e, E_MAX, v)
+            setfield(e, E_SUM, v)
+            setfield(e, E_CNT, 1)
             return nothing
-        elseif t.hash[idx] == h && t.len[idx] == nlen &&
-               name_eq(base, t.off[idx], noff, nlen)
-            v < t.min[idx] && (t.min[idx] = Int32(v))
-            v > t.max[idx] && (t.max[idx] = Int32(v))
-            t.sum[idx] += v
-            t.cnt[idx] += Int32(1)
+        elseif field(e, E_HASH) == hi && field(e, E_LEN) == nlen &&
+               name_eq(base, field(e, E_OFF), noff, nlen)
+            v < field(e, E_MIN) && setfield(e, E_MIN, v)
+            v > field(e, E_MAX) && setfield(e, E_MAX, v)
+            setfield(e, E_SUM, field(e, E_SUM) + v)
+            setfield(e, E_CNT, field(e, E_CNT) + 1)
             return nothing
         end
-        idx = idx == TABLE_SIZE ? 1 : idx + 1
+        # The table is a power of two, so wrapping is a mask, not a branch.
+        idx = (idx + 1) & Int(TABLE_MASK)
     end
 end
 
@@ -111,10 +134,11 @@ naive version.
 function merge_tables(tables, base::Ptr{UInt8})
     out = Dict{String,Stat}()
     for t in tables
-        @inbounds for i in 1:TABLE_SIZE
-            t.cnt[i] == 0 && continue
-            name = unsafe_string(base + t.off[i], t.len[i])
-            s = Stat(t.min[i], t.max[i], t.sum[i], t.cnt[i])
+        GC.@preserve t for i in 0:(TABLE_SIZE - 1)
+            e = entry(t, i)
+            field(e, E_CNT) == 0 && continue
+            name = unsafe_string(base + field(e, E_OFF), field(e, E_LEN))
+            s = Stat(field(e, E_MIN), field(e, E_MAX), field(e, E_SUM), field(e, E_CNT))
             prev = get(out, name, nothing)
             out[name] = prev === nothing ? s : combine(prev, s)
         end
