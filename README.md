@@ -189,6 +189,40 @@ measured — which is about what you would expect from TLB and page-table
 pressure appearing only at the real size. Close enough that the smaller
 measurements were worth trusting, and far enough to be worth saying.
 
+### Thread scaling
+
+1e9 rows on huge pages, one core through four, pinned with `numactl`:
+
+| cores | time | M rows/s | speedup |
+|--:|--:|--:|--:|
+| 1 | 9.181 s | 108.9 | 1.00× |
+| 2 | 4.684 s | 213.5 | 1.96× |
+| 3 | 3.201 s | 312.4 | 2.87× |
+| 4 | 2.486 s | 402.2 | 3.69× |
+
+Amdahl's law fits these to within 0.8%: `T(n) = 0.229 + 8.945/n`. The serial
+term is worth noting — the fit lands on 0.229 s without being told anything,
+against the 0.20 s of process startup measured separately against a one-row
+input. Two independent routes to the same number.
+
+Fitting the Universal Scalability Law instead, which allows for degradation,
+gives contention α = 0.0127 and coherency β = 0.0037, with a predicted peak
+around 16 cores. Extrapolated:
+
+| cores | Amdahl | USL |
+|--:|--:|--:|
+| 8 | 1.35 s | 1.49 s |
+| 16 | 0.79 s | 1.19 s |
+
+Treat that as an indication, not a result. It doubles beyond the measured range;
+β is fitted from three points whose efficiencies differ by only a few percent;
+and this is a 4-core VM, whose memory subsystem tells you little about an 8-core
+machine's. Amdahl at 8 cores implies about 10 GB/s of sustained traffic, which
+is a hardware question we cannot answer from here.
+
+For scale, the winning 1BRC entry ran 1.535 s on eight cores of a 32-core EPYC
+7502P — inside the range these models bracket, on faster silicon than this.
+
 ### Huge pages, which are a mount option and not code
 
 At 1e9 rows the input is 3.4 million 4 KiB pages, and every run faults them all
