@@ -1,18 +1,16 @@
-# Open-addressing table, one thread each, nothing shared.
+# Open-addressing table, one per thread, nothing shared.
 #
-# A Dict is unusable here: hashing a String key means materialising one, so an
-# allocation and a copy per row. This never resizes (the challenge caps the
-# station set at 10 000 names) and splits each slot in two: 32 hot bytes that
-# every row touches, and the name's offset and length, which only an insert, a
-# name of 16 bytes or more, and the final merge ever read. At the 10 000-name
-# cap that keeps the hot working set to 320 KB rather than 640 KB.
+# A Dict would mean materialising a String key per row. This never resizes (the
+# spec caps the station set at 10 000) and splits each slot in two: 32 hot bytes
+# every row touches, and the name's offset and length, read only on insert, for
+# names of 16 bytes or more, and at merge. That halves the hot working set.
 
 const TABLE_BITS = 15
 const TABLE_SIZE = 1 << TABLE_BITS
 const TABLE_MASK = UInt64(TABLE_SIZE - 1)
 
-# Field offsets within one 32-byte hot entry. Two entries share a cache line,
-# which suits linear probing: a miss brings its neighbour in for free.
+# Two entries per cache line, which suits linear probing: a miss brings the
+# neighbour in for free.
 const ENTRY_BYTES = 32
 const O_KEY0 = 0     # UInt64, name bytes 1..8,  masked to length
 const O_KEY1 = 8     # UInt64, name bytes 9..16, masked to length
@@ -23,9 +21,8 @@ const O_MAX  = 30    # Int16
 
 const INLINE_KEY_BYTES = 16
 
-# Refuse past half full. The table never resizes, so overfilling it would leave
-# the probe loop searching forever for an empty slot — a hang rather than a
-# wrong answer. Half also keeps linear probing in the regime where it is fast.
+# Overfilling would leave the probe loop hunting an empty slot forever — a hang,
+# not a wrong answer. Half also keeps linear probing fast.
 const MAX_ENTRIES = TABLE_SIZE ÷ 2
 
 struct Table
@@ -37,8 +34,7 @@ struct Table
 end
 
 function Table()
-    # Julia guarantees no alignment for array data, and an entry straddling two
-    # cache lines would defeat the point, so over-allocate and align by hand.
+    # Julia guarantees no alignment for array data, so align by hand.
     data = zeros(Int64, (ENTRY_BYTES ÷ 8) * (TABLE_SIZE + 2))
     p = Ptr{UInt8}(pointer(data))
     pad = -Int(UInt(p)) & 63
@@ -54,12 +50,7 @@ end
     "the challenge caps the station set at 10000, so either the input is out " *
     "of spec or TABLE_BITS (currently $TABLE_BITS) needs raising")
 
-"""
-    name_tail_eq(base, a, b, len) -> Bool
-
-Compare two names of equal length past their first 16 bytes, which the caller
-has already matched against the entry's inline key.
-"""
+"""Compare two names of equal length past the 16 bytes already matched."""
 @inline function name_tail_eq(base::Ptr{UInt8}, a::Int, b::Int, len::Int)
     i = INLINE_KEY_BYTES
     while i + 8 <= len
@@ -72,19 +63,16 @@ has already matched against the entry's inline key.
            (unsafe_load(Ptr{UInt64}(base + b + i)) & m)
 end
 
-"""Is this slot unused? A count of zero can only mean untouched."""
+"""A count of zero can only mean untouched."""
 @inline slot_free(e::Ptr{UInt8}) = ld(Int32, e, O_CNT) == 0
 
 """
     slot_matches(t, e, base, idx, pos, name) -> Bool
 
-Does this slot hold `name`?
-
-A name under 16 bytes leaves a zero byte in `key1` from the masking, and station
-names contain no NUL, so the inline key settles it: the stored name must carry
-the same zero byte and therefore the same length. Only a name of 16 bytes or
-more is ambiguous against a longer one sharing its first 16, and those consult
-the cold length and offset — which is what keeps the length out of the hot entry.
+A name under 16 bytes leaves a zero byte in `key1` from the masking, and names
+contain no NUL, so the inline key implies the length too. Only names of 16 bytes
+or more can collide with a longer one sharing their first 16; those consult the
+cold length and offset, which is what keeps the length out of the hot entry.
 """
 @inline function slot_matches(t::Table, e::Ptr{UInt8}, base::Ptr{UInt8},
                               idx::Int, pos::Int, name::Name)
@@ -96,10 +84,10 @@ the cold length and offset — which is what keeps the length out of the hot ent
                     name_tail_eq(base, t.off[idx + 1], pos, nlen)
 end
 
-"""Claim an empty slot for `name`, refusing to take the table past half full."""
+"""Claim an empty slot for `name`."""
 @inline function slot_claim!(t::Table, e::Ptr{UInt8}, idx::Int, pos::Int,
                              name::Name, v::Int64)
-    n = t.nlive[] + 1              # once per station, not per row
+    n = t.nlive[] + 1              # per station, not per row
     n > MAX_ENTRIES && table_full()
     t.nlive[] = n
     st!(e, O_KEY0, name.key0)
@@ -113,7 +101,7 @@ end
     return nothing
 end
 
-"""Fold one more reading into a slot that already holds this station."""
+"""Fold one reading into a slot already holding this station."""
 @inline function slot_accumulate!(e::Ptr{UInt8}, v::Int64)
     v16 = Int16(v)
     v16 < ld(Int16, e, O_MIN) && st!(e, O_MIN, v16)
@@ -123,11 +111,7 @@ end
     return nothing
 end
 
-"""
-    update!(t, base, pos, name, v)
-
-Insert or accumulate one row, probing linearly from the hash.
-"""
+"""Insert or accumulate one row, probing linearly from the hash."""
 @inline function update!(t::Table, base::Ptr{UInt8}, pos::Int, name::Name, v::Int64)
     idx = Int(name.hash & TABLE_MASK)
     while true
@@ -152,11 +136,7 @@ end
 @inline combine(a::Stat, b::Stat) =
     Stat(min(a.min, b.min), max(a.max, b.max), a.sum + b.sum, a.cnt + b.cnt)
 
-"""
-    merge_tables(tables, base) -> Dict{String,Stat}
-
-Reconcile the per-thread tables. The only place a `String` is created.
-"""
+"""Reconcile the per-thread tables. The only place a `String` is created."""
 function merge_tables(tables, base::Ptr{UInt8})
     out = Dict{String,Stat}()
     for t in tables

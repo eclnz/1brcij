@@ -1,5 +1,5 @@
-# Measurement file generator, mirroring the reference one: a station drawn
-# uniformly, its temperature normal around the station mean with sd 10.
+# Mirrors the reference generator: a station drawn uniformly, its temperature
+# normal around that station's mean with sd 10.
 
 struct Station
     name::String
@@ -8,11 +8,7 @@ end
 
 stations_path() = joinpath(dirname(@__DIR__), "data", "stations.csv")
 
-"""
-    load_stations([path]) -> Vector{Station}
-
-Read a `<name>;<mean temperature>` list, skipping `#` comments.
-"""
+"""Read a `<name>;<mean temperature>` list, skipping `#` comments."""
 function load_stations(path::AbstractString = stations_path())
     out = Station[]
     for line in eachline(path)
@@ -39,8 +35,8 @@ end
 """
     generate(path, nrows; seed, stations) -> path
 
-Write `nrows` rows of `<station>;<temperature>`. Temperatures are clamped to the
-documented `-99.9 .. 99.9` so the file always satisfies the parser's assumptions.
+Write `nrows` rows. Temperatures are clamped to `-99.9 .. 99.9` so the file
+always satisfies the parser's assumptions.
 """
 function generate(path::AbstractString, nrows::Integer;
                   seed::Integer = 20240101,

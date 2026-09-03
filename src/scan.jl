@@ -7,11 +7,7 @@ const STREAMS = 5                 # swept 1..8; 4..6 tie, 7+ spills
 @assert STREAMS == 5   # process_segment! unrolls this many cursors by hand
 const MIN_STREAM_BYTES = 1 << 14  # below this a segment is scanned serially
 
-"""
-    Work
-
-Atomic segment counter, the only shared mutable state in the program.
-"""
+"""Atomic segment counter — the only shared mutable state in the program."""
 struct Work
     nseg::Int
     counter::Threads.Atomic{Int}
@@ -25,11 +21,7 @@ Work(nseg::Int) = Work(nseg, Threads.Atomic{Int}(1))
     return i <= w.nseg ? i : 0
 end
 
-"""
-    next_row_start(base, off, limit) -> Int
-
-First byte after the next newline at or after `off`, clamped to `limit`.
-"""
+"""First byte after the next newline at or after `off`, clamped to `limit`."""
 @inline function next_row_start(base::Ptr{UInt8}, off::Int, limit::Int)
     while off < limit && unsafe_load(base + off) != NEWLINE
         off += 1
@@ -40,10 +32,9 @@ end
 """
     segment_start(base, seg, fend) -> Int
 
-Start of segment `seg` (1-based) within `[0, fend)`, repaired to a row boundary.
-
-A segment's stop is `segment_start(base, seg + 1, fend)` — the same function, so
-neighbouring threads agree by construction and every row is scanned once.
+Start of segment `seg` (1-based), repaired to a row boundary. A segment's stop
+is this same function applied to `seg + 1`, so neighbouring threads agree by
+construction and every row is scanned once.
 """
 @inline function segment_start(base::Ptr{UInt8}, seg::Int, fend::Int)
     seg == 1 && return 0
@@ -52,11 +43,9 @@ neighbouring threads agree by construction and every row is scanned once.
     return next_row_start(base, off, fend)
 end
 
-# Julia exposes no prefetch intrinsic, so this is hand-written LLVM IR and the
-# most fragile code here: `ptr` is LLVM's opaque pointer type and needs a
-# reasonably modern LLVM. Arguments are (address, write, locality, data cache).
-# It lowers to nothing on targets without a prefetch instruction, so it stays
-# portable; a write prefetch because the entry is read-modify-written.
+# No prefetch intrinsic in Julia, so hand-written IR — the most fragile code
+# here. Arguments are (address, write, locality, data cache); write, because the
+# entry is read-modify-written. Lowers to nothing where the target lacks it.
 @inline function prefetch(p::Ptr)
     Base.llvmcall(("""
         declare void @llvm.prefetch.p0(ptr, i32, i32, i32)
@@ -71,12 +60,7 @@ end
 
 @inline slot(t::Table, h::UInt64) = entry(t, Int(h & TABLE_MASK))
 
-"""
-    finish_row!(t, base, pos, name) -> Int
-
-Second half of a row, once its name is scanned: parse the value, accumulate it,
-and return the offset of the next row.
-"""
+"""Parse the value, accumulate, and return the offset of the next row."""
 @inline function finish_row!(t::Table, base::Ptr{UInt8}, pos::Int, name::Name)
     vstart = name.stop + 1
     v, adv = parse_value(unsafe_load(Ptr{UInt64}(base + vstart)))
@@ -84,11 +68,7 @@ and return the offset of the next row.
     return vstart + adv
 end
 
-"""
-    process_row!(t, base, pos) -> Int
-
-Handle one `<name>;<value>\\n` row and return the offset of the next.
-"""
+"""One `<name>;<value>` row; returns the offset of the next."""
 @inline function process_row!(t::Table, base::Ptr{UInt8}, pos::Int)
     return finish_row!(t, base, pos, scan_name(base, pos))
 end
@@ -105,21 +85,16 @@ end
 
 Scan `[a, b)`, which must begin on a row boundary.
 
-Row *n+1*'s position is only known once row *n* is parsed, so a single cursor is
-one long dependency chain and every cache miss stalls everything behind it.
+Row *n+1*'s position is unknown until row *n* is parsed, so one cursor is a
+single dependency chain where every cache miss stalls everything behind it.
 `STREAMS` sub-ranges advanced round-robin give the out-of-order engine
-independent chains to overlap, while each still reads sequentially. The cursors
-are plain locals so they stay in registers.
+independent chains to overlap, each still read sequentially.
 
-The loop is pipelined — hash every stream and prefetch its entry, then parse
-and accumulate them all — so each prefetch has four further rows of work in
-front of it. That distance is the whole point: prefetching immediately before
-the probe leaves only `parse_value` to cover the miss and measures flat, and
-pipelining without the prefetch measures flat too.
-
-`STREAMS` therefore sets the prefetch distance as well as the number of
-independent chains, which is why 5 beats the 3 that suffices for ILP alone.
-Changing it means editing the unrolled body below.
+Hashing every stream before parsing any of them puts four rows of work between
+each prefetch and its use. That distance is the point: prefetching just before
+the probe measures flat, and pipelining without prefetching measures flat too.
+So `STREAMS` sets prefetch distance as well as chain count, which is why 5 beats
+the 3 that suffices for ILP alone. Changing it means editing the body below.
 """
 function process_segment!(t::Table, base::Ptr{UInt8}, a::Int, b::Int)
     if b - a < STREAMS * MIN_STREAM_BYTES
@@ -129,10 +104,9 @@ function process_segment!(t::Table, base::Ptr{UInt8}, a::Int, b::Int)
     starts = ntuple(k -> k == 1 ? a : next_row_start(base, a + (k - 1) * span ÷ STREAMS, b),
                     Val(STREAMS))
 
-    # `@nexprs` needs a literal count, so the 5s below must match STREAMS; the
-    # check above the function keeps them in step. Unrolling into plain locals
-    # rather than looping over a container is what keeps the cursors in
-    # registers, which the whole design depends on.
+    # `@nexprs` needs a literal, so the 5s must match STREAMS — the assert above
+    # keeps them in step. Plain locals, not a container: the cursors have to stay
+    # in registers.
     @nexprs 5 k -> p_k = starts[k]
     @nexprs 5 k -> e_k = (k == 5 ? b : starts[k + 1])
 
@@ -150,13 +124,12 @@ end
 """
     scan_parallel(base, fend) -> Vector{Table}
 
-One task per thread, each pulling segments off the queue until it is empty.
-Threads finish segments at different rates, so a fixed 1/N split of the file
-would leave everyone waiting on the slowest.
+One task per thread, each pulling segments off the queue until it drains — a
+fixed 1/N split would leave everyone waiting on the slowest.
 
-Each `Table` is allocated inside its own task: separate allocations avoid false
-sharing and land on memory local to whichever NUMA node the task runs on.
-Captures are bound with `let` so the closure cannot need a `Core.Box`.
+Each `Table` is allocated inside its own task, which avoids false sharing and
+puts it on memory local to that task's NUMA node. Captures are bound with `let`
+so the closure cannot need a `Core.Box`.
 """
 function scan_parallel(base::Ptr{UInt8}, fend::Int)
     fend <= 0 && return Table[]
@@ -168,7 +141,6 @@ function scan_parallel(base::Ptr{UInt8}, fend::Int)
         tasks[i] = let base = base, fend = fend, work = work
             Threads.@spawn begin
                 tbl = Table()
-                # tbl is addressed through a raw pointer into its own array.
                 GC.@preserve tbl while (seg = claim!(work)) != 0
                     a = segment_start(base, seg, fend)
                     b = segment_start(base, seg + 1, fend)

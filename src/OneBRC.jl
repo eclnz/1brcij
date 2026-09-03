@@ -1,17 +1,16 @@
 """
     OneBRC
 
-The One Billion Row Challenge: min/mean/max per weather station from a ~13.8 GB
-`<station>;<temperature>` file.
+Min/mean/max per weather station from a ~13.8 GB `<station>;<temperature>` file.
 
     julia -t auto -O3 --check-bounds=no --startup-file=no bin/brc.jl measurements.txt
 
-Assumptions, all from the challenge spec and all load-bearing: a little-endian
-machine; temperatures of the form `-?d?d.d`; station names under 100 bytes
-containing no `';'` or newline; well-formed, newline-terminated rows.
+Load-bearing assumptions, all from the challenge spec: little-endian; values of
+the form `-?d?d.d`; names under 100 bytes with no `';'` or newline; well-formed,
+newline-terminated rows.
 
-`@inbounds` is also written out explicitly, since `--check-bounds=no` is a
-startup flag and is unavailable to a PackageCompiler app.
+`@inbounds` is written out as well, since `--check-bounds=no` is a startup flag
+and unavailable to a PackageCompiler app.
 """
 module OneBRC
 
@@ -27,20 +26,18 @@ include("output.jl")
 include("reference.jl")
 include("generate.jl")
 
-# The fast path overreads up to 8 bytes. Inside an mmap that is only safe
-# because the kernel zero-fills the last partial page, and not safe at all when
-# the file size is a multiple of the page size. Rather than depend on that,
-# carve off a tail for the byte-at-a-time parser: a few thousand rows.
+# The fast path overreads 8 bytes, which an mmap only tolerates because the
+# kernel zero-fills the last partial page — and not at all when the file size is
+# a multiple of it. So carve off a tail for the byte-at-a-time parser.
 const TAIL_SLACK = 1 << 16
 const MAX_ROW_BYTES = 1 << 12
 
 """
     fast_region_end(data, fsize) -> Int
 
-Row boundary at least `TAIL_SLACK` bytes before the end of the file, so wide
-loads below it stay well inside the mapping. Returns 0 when the search window
-holds no row boundary, sending the whole file down the slow path — reachable
-only on malformed input.
+Row boundary at least `TAIL_SLACK` before the end of the file, so wide loads
+below it stay inside the mapping. Returns 0 if the window holds no boundary,
+sending everything down the slow path — only reachable on malformed input.
 """
 function fast_region_end(data::Vector{UInt8}, fsize::Int)
     fsize <= TAIL_SLACK && return 0
@@ -54,19 +51,14 @@ function fast_region_end(data::Vector{UInt8}, fsize::Int)
     return 0
 end
 
-"""
-    run_file(path) -> Dict{String,Stat}
-
-Aggregate one measurements file. Statistics are in tenths of a degree.
-"""
+"""Aggregate one measurements file. Statistics are in tenths of a degree."""
 function run_file(path::AbstractString)
     io = open(path, "r")
     try
         fsize = Int(filesize(io))
         fsize == 0 && return Dict{String,Stat}()
         data = Mmap.mmap(io, Vector{UInt8}, fsize)
-        # Not optional: without it the compiler may treat `data` as dead while
-        # raw pointers into it are still live.
+        # Not optional: `data` is otherwise dead while pointers into it live on.
         return GC.@preserve data begin
             base = pointer(data)
             fend = fast_region_end(data, fsize)
@@ -142,10 +134,9 @@ function julia_main()::Cint
     end
 end
 
-# 1BRC times the launch script end to end, so first-call compilation is
-# measured too — the problem the JVM entries solved with GraalVM native images.
-# Exercising the pipeline during precompilation bakes these specialisations into
-# the package image, taking a run's fixed cost from 819 ms to 174 ms.
+# 1BRC times the launch script end to end, so first-call compilation counts.
+# Exercising the pipeline here bakes the specialisations into the package image,
+# taking a run's fixed cost from 819 ms to 174 ms.
 function _precompile_workload()
     rows = IOBuffer()
     for i in 1:400
@@ -170,7 +161,7 @@ end
 
 if ccall(:jl_generating_output, Cint, ()) == 1
     _precompile_workload()
-    # Methods needing the filesystem are cached by directive instead.
+    # Anything needing the filesystem is cached by directive instead.
     precompile(run_file, (String,))
     precompile(main, (Vector{String},))
     precompile(julia_main, ())

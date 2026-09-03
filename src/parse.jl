@@ -1,10 +1,8 @@
-# SWAR scanning and branchless parsing.
+# Scanning primitives and the branchless value parser.
 #
-# Little-endian only: byte 0 in memory is the low byte of a loaded UInt64.
-# Offsets are 0-based bytes from a Ptr{UInt8}, never the 1-based
-# `unsafe_load(p, i)` form. Callers must allow an 8-byte overread from any
-# offset touched here; `fast_region_end` carves a tail off the file so this
-# holds without relying on mmap page padding.
+# Little-endian only. Offsets are 0-based bytes from a Ptr{UInt8}, never the
+# 1-based `unsafe_load(p, i)`. Callers must allow an 8-byte overread from any
+# offset touched here; `fast_region_end` carves off a file tail so that holds.
 
 const ONES  = 0x0101010101010101
 const HIGHS = 0x8080808080808080
@@ -12,12 +10,7 @@ const SEMIS = 0x3b3b3b3b3b3b3b3b
 const NEWLINE = 0x0a
 const SEMICOLON = 0x3b
 
-"""
-    match16(p, c) -> UInt32
-
-Bytewise compare of the 16 bytes at `p` against `c`, as a 16-bit mask. One
-`vpcmpeqb` where the SWAR path needs two word-at-a-time sequences.
-"""
+"""Bytewise compare of the 16 bytes at `p` against `c`, as a 16-bit mask."""
 @inline function match16(p::Ptr{UInt8}, c::UInt8)
     Base.llvmcall(("""
         define i32 @entry(i64 %p, i8 %c) #0 {
@@ -34,56 +27,16 @@ Bytewise compare of the 16 bytes at `p` against `c`, as a 16-bit mask. One
         """, "entry"), UInt32, Tuple{UInt64, UInt8}, UInt64(p), c)
 end
 
-"""
-    eq2x64(p, a, b) -> Bool
-
-Are the two 64-bit words at `p` equal to `a` and `b`? One vector compare
-instead of two scalar ones.
-"""
-@inline function eq2x64(p::Ptr{UInt8}, a::UInt64, b::UInt64)
-    Base.llvmcall(("""
-        define i8 @entry(i64 %p, i64 %a, i64 %b) #0 {
-            %ptr = inttoptr i64 %p to ptr
-            %v = load <2 x i64>, ptr %ptr, align 8
-            %k0 = insertelement <2 x i64> undef, i64 %a, i32 0
-            %k1 = insertelement <2 x i64> %k0, i64 %b, i32 1
-            %e = icmp eq <2 x i64> %v, %k1
-            %m = bitcast <2 x i1> %e to i2
-            %f = icmp eq i2 %m, 3
-            %r = zext i1 %f to i8
-            ret i8 %r
-        }
-        attributes #0 = { alwaysinline }
-        """, "entry"), Bool, Tuple{UInt64, UInt64, UInt64}, UInt64(p), a, b)
-end
-
-
-"""
-    match_bytes(word, pattern) -> UInt64
-
-Set 0x80 in each byte lane of `word` equal to `pattern`. `trailing_zeros(m) >> 3`
-gives the index of the first match.
-"""
+"""Set 0x80 in each byte lane of `word` equal to `pattern`."""
 @inline function match_bytes(word::UInt64, pattern::UInt64)
     x = word ⊻ pattern
     return (x - ONES) & ~x & HIGHS      # the borrow marks zero lanes
 end
 
-"""
-    tail_mask(nbytes) -> UInt64
-
-Mask keeping the low `nbytes` bytes. `nbytes == 0` shifts by 64, which Julia
-defines as 0 (unlike C), so there is no special case.
-"""
+"""Mask keeping the low `nbytes` bytes. A 64-bit shift is 0 in Julia, unlike C."""
 @inline tail_mask(nbytes::Int) = typemax(UInt64) >> (64 - 8 * nbytes)
 
-"""
-    Name
-
-A station name located in the mapping: its hash, the 0-based offset of the
-terminating `';'`, and its first 16 bytes masked to length. Immutable and
-isbits, so it lives in registers exactly as the tuple it replaced did.
-"""
+"""A located name: its hash, the offset of its `';'`, and its first 16 bytes."""
 struct Name
     hash::UInt64
     stop::Int
@@ -96,23 +49,15 @@ const HASH_PRIME = 0x00000100000001b3   # odd, so the multiply stays invertible
 
 @inline mix(h::UInt64, w::UInt64) = (h ⊻ w) * HASH_PRIME
 
-"""
-    finalize_hash(h) -> UInt64
-
-Fold the high bits down before indexing: a multiply diffuses poorly into the
-low bits, which is where `TABLE_MASK` looks. Over 10 000 station names this
-costs 0.05 probes per insert against 5.23 for the raw low bits.
-"""
+# A multiply diffuses poorly into its low bits, which is where TABLE_MASK looks.
+# Across 10 000 names: 0.05 probes per insert with this, 5.23 without.
 @inline finalize_hash(h::UInt64) = h ⊻ (h >> 29)
 
 """
     scan_name(base, pos) -> Name
 
-Locate and hash the name in one pass. The key words are its first 16 bytes
-masked to length, which is what the table compares against.
-
-One 16-byte vector compare finds the delimiter for any name under 16 bytes,
-which is 95% of the station set, and the masking is branchless from there.
+Locate and hash the name in one pass. One vector compare covers any name under
+16 bytes, which is 95% of the station set; the key masking is branchless.
 """
 @inline function scan_name(base::Ptr{UInt8}, pos::Int)
     m = match16(base + pos, SEMICOLON)
@@ -127,11 +72,7 @@ which is 95% of the station set, and the masking is branchless from there.
     return scan_name_long(base, pos, w0, w1)
 end
 
-"""
-    scan_name_long(base, pos, w0, w1) -> Name
-
-Names of 16 bytes or more. `@noinline` keeps its loop out of the two paths above.
-"""
+"""Names of 16 bytes or more. `@noinline` keeps the loop out of the path above."""
 @noinline function scan_name_long(base::Ptr{UInt8}, pos::Int, w0::UInt64, w1::UInt64)
     h = mix(mix(HASH_BASIS, w0), w1)
     p = pos + 16
@@ -159,14 +100,13 @@ const ABS_MASK   = Int64(0x00000000000003ff)
 """
     parse_value(word) -> (tenths, nbytes)
 
-Parse `-?d?d.d\\n` from one 8-byte load with no branches (the merykitty trick).
-Returns tenths of a degree, and the bytes consumed so the next row starts at
-`value_start + nbytes`.
+Parse `-?d?d.d\\n` from one 8-byte load with no branches (the merykitty trick),
+returning tenths and the bytes consumed.
 
 `'.'` and `'-'` have bit 4 clear where digits have it set, which locates both
-without comparing. Shifting by `28 - dot` aligns the digits into fixed
-positions whatever the layout was, `DIGIT_MUL` then sums `100d₁ + 10d₂ + d₃` in
-a single multiply, and `(v ⊻ signed) - signed` negates without a branch.
+without comparing. The shift by `28 - dot` aligns the digits whatever the
+layout, `DIGIT_MUL` sums `100d₁ + 10d₂ + d₃` in one multiply, and
+`(v ⊻ signed) - signed` negates without a branch.
 """
 @inline function parse_value(word::UInt64)
     w = reinterpret(Int64, word)

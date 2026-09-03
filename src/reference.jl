@@ -1,12 +1,7 @@
-# The obviously-correct oracle the fast path is diffed against, plus the
-# byte-at-a-time parser for the carved-out file tail (see `fast_region_end`).
+# The obvious-and-slow oracle the fast path is diffed against, plus the
+# byte-at-a-time parser for the carved-out file tail.
 
-"""
-    parse_tenths(s) -> Int64
-
-Parse a temperature into tenths, assuming nothing about its layout.
-Deliberately unrelated to `parse_value` so it is an independent check on it.
-"""
+"""Parse into tenths assuming nothing — deliberately unrelated to `parse_value`."""
 function parse_tenths(s::AbstractString)
     return round(Int64, parse(Float64, s) * 10)
 end
@@ -14,8 +9,8 @@ end
 """
     baseline(path) -> Dict{String,Stat}
 
-One `String` per line, two `SubString`s per row, a generic float parse. Minutes
-on the full file, and the oracle everything else is checked against.
+A `String` per line, two `SubString`s per row, a generic float parse. Minutes on
+the full file, and the oracle everything else is checked against.
 """
 function baseline(path::AbstractString)
     stats = Dict{String,Stat}()
@@ -32,12 +27,7 @@ function baseline(path::AbstractString)
     return stats
 end
 
-"""
-    accumulate_slow!(stats, data, from, to)
-
-Accumulate rows in the 0-based byte range `[from, to)` with no wide loads, so it
-is safe against the end of the mapping. Only the last few thousand rows.
-"""
+"""Accumulate `[from, to)` with no wide loads, so it is safe at the mapping's end."""
 function accumulate_slow!(stats::Dict{String,Stat}, data::Vector{UInt8},
                           from::Int, to::Int)
     pos = from
