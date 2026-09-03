@@ -3,7 +3,7 @@ include(joinpath(@__DIR__, "..", "src", "OneBRC.jl"))
 using .OneBRC
 using Random
 using .OneBRC: match_bytes, tail_mask, scan_name, parse_value, parse_tenths,
-               Table, update!, merge_tables, Stat, combine, name_eq,
+               Table, update!, merge_tables, Stat, combine, name_tail_eq,
                fmt_tenths, round_tenths, format_result, fast_region_end,
                next_row_start, segment_start, SEGMENT_SIZE, TAIL_SLACK,
                accumulate_slow!, load_stations, generate, run_file
@@ -62,13 +62,21 @@ end
                  "Alexandra", "Alexandria", repeat("x", 99)]
         buf = Vector{UInt8}(codeunits(name * ";12.3\n"))
         append!(buf, zeros(UInt8, 16))
-        h, nend = GC.@preserve buf scan_name(pointer(buf), 0)
+        h, nend, k0, k1 = GC.@preserve buf scan_name(pointer(buf), 0)
         @test nend == length(codeunits(name))
+        # the inline key must be the name's first 16 bytes, masked to length
+        raw = Vector{UInt8}(codeunits(name)); append!(raw, zeros(UInt8, 16))
+        want0 = GC.@preserve raw unsafe_load(Ptr{UInt64}(pointer(raw)))
+        want1 = GC.@preserve raw unsafe_load(Ptr{UInt64}(pointer(raw) + 8))
+        n = length(codeunits(name))
+        @test k0 == (n >= 8 ? want0 : want0 & OneBRC.tail_mask(n))
+        @test k1 == (n >= 16 ? want1 : n <= 8 ? UInt64(0) :
+                     want1 & OneBRC.tail_mask(n - 8))
         # the hash must depend only on the name, not on what follows it
         buf2 = Vector{UInt8}(codeunits(name * ";-45.6\nZagreb;1.0\n"))
         append!(buf2, zeros(UInt8, 16))
-        h2, nend2 = GC.@preserve buf2 scan_name(pointer(buf2), 0)
-        @test (h, nend) == (h2, nend2)
+        h2, nend2, k02, k12 = GC.@preserve buf2 scan_name(pointer(buf2), 0)
+        @test (h, nend, k0, k1) == (h2, nend2, k02, k12)
     end
     # distinct names must land on distinct hashes for the real station list
     names = [s.name for s in load_stations()]
@@ -116,15 +124,19 @@ end
     @test worst < 24
 end
 
-@testset "name comparison" begin
-    a = Vector{UInt8}(codeunits("Alexandria;1.0\nAlexandra;1.0\nAlexandria;2.0\n"))
+@testset "name comparison beyond the inline key" begin
+    # name_tail_eq only compares from byte 16 on; the first 16 are the entry's
+    # inline key and are compared there.
+    long1 = "Alexandria-on-the-Sea"        # 21 bytes, shares its first 16
+    long2 = "Alexandria-on-the-Bay"        # 21 bytes, differs at byte 19
+    a = Vector{UInt8}(codeunits(long1 * "\n" * long2 * "\n" * long1 * "\n"))
     append!(a, zeros(UInt8, 16))
+    n = ncodeunits(long1)
     GC.@preserve a begin
         p = pointer(a)
-        @test name_eq(p, 0, 29, 10)        # Alexandria vs Alexandria
-        @test !name_eq(p, 0, 15, 9)        # different lengths handled by caller
-        @test name_eq(p, 15, 15, 9)
-        @test !name_eq(p, 0, 16, 9)
+        @test name_tail_eq(p, 0, 2n + 2, n)      # long1 vs long1
+        @test !name_tail_eq(p, 0, n + 1, n)      # long1 vs long2
+        @test name_tail_eq(p, n + 1, n + 1, n)   # reflexive
     end
 end
 
@@ -239,8 +251,8 @@ end
             p = pointer(buf)
             pos = 0
             for _ in 1:n
-                h, nend = scan_name(p, pos)
-                update!(tbl, p, h, pos, nend - pos, Int64(10))
+                h, nend, k0, k1 = scan_name(p, pos)
+                update!(tbl, p, h, pos, nend - pos, k0, k1, Int64(10))
                 pos = nend + 6            # ";1.0\n"
             end
         end

@@ -67,10 +67,10 @@ end
 Handle one `<name>;<value>\\n` row and return the offset of the next row.
 """
 @inline function process_row!(t::Table, base::Ptr{UInt8}, pos::Int)
-    h, nend = scan_name(base, pos)
+    h, nend, k0, k1 = scan_name(base, pos)
     vstart = nend + 1
     v, adv = parse_value(unsafe_load(Ptr{UInt64}(base + vstart)))
-    update!(t, base, h, pos, nend - pos, v)
+    update!(t, base, h, pos, nend - pos, k0, k1, v)
     return vstart + adv
 end
 

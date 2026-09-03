@@ -59,23 +59,55 @@ nothing when the value is also used as the stored key digest.
 @inline finalize_hash(h::UInt64) = h ⊻ (h >> 29)
 
 """
-    scan_name(base, pos) -> (hash, name_end)
+    scan_name(base, pos) -> (hash, name_end, key0, key1)
 
 Scan the station name starting at `pos` and hash it in the same pass: the name
 bytes are read exactly once and no `String` is ever materialised.  Returns the
-finalized FNV-1a hash of the name and the 0-based offset of its terminating
-`';'`.
+finalized FNV-1a hash, the 0-based offset of the terminating `';'`, and the
+name's first sixteen bytes as two words masked to its length.
+
+The two words are what the table compares against, so it can decide a hit
+without going back to the mapping for names of sixteen bytes or fewer.  The
+one- and two-word cases are written out rather than left to the loop because
+they cover 95% of the 10 000-name station set, and writing them out keeps the
+common path free of the loop's serial multiply chain.
 """
 @inline function scan_name(base::Ptr{UInt8}, pos::Int)
-    h = HASH_BASIS
-    p = pos
+    w0 = unsafe_load(Ptr{UInt64}(base + pos))
+    m0 = match_bytes(w0, SEMIS)
+    if m0 != 0                                    # name is 0..7 bytes
+        n = trailing_zeros(m0) >> 3
+        k0 = w0 & tail_mask(n)
+        return finalize_hash(mix(HASH_BASIS, k0)), pos + n, k0, UInt64(0)
+    end
+
+    w1 = unsafe_load(Ptr{UInt64}(base + pos + 8))
+    m1 = match_bytes(w1, SEMIS)
+    if m1 != 0                                    # name is 8..15 bytes
+        n = trailing_zeros(m1) >> 3
+        k1 = w1 & tail_mask(n)
+        return finalize_hash(mix(mix(HASH_BASIS, w0), k1)), pos + 8 + n, w0, k1
+    end
+
+    return scan_name_long(base, pos, w0, w1)      # 16 bytes or more: rare
+end
+
+"""
+    scan_name_long(base, pos, w0, w1) -> (hash, name_end, key0, key1)
+
+The general case, for names of sixteen bytes or more.  Split out and marked
+`@noinline` so its loop does not bloat the two paths above.
+"""
+@noinline function scan_name_long(base::Ptr{UInt8}, pos::Int, w0::UInt64, w1::UInt64)
+    h = mix(mix(HASH_BASIS, w0), w1)
+    p = pos + 16
     while true
         word = unsafe_load(Ptr{UInt64}(base + p))
         m = match_bytes(word, SEMIS)
         if m != 0
-            n = trailing_zeros(m) >> 3        # bytes of name in this word
-            h = mix(h, word & tail_mask(n))   # drop the ';' and everything after
-            return finalize_hash(h), p + n
+            n = trailing_zeros(m) >> 3
+            h = mix(h, word & tail_mask(n))
+            return finalize_hash(h), p + n, w0, w1
         end
         h = mix(h, word)
         p += 8

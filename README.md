@@ -56,10 +56,10 @@ ever built.
 fixed sequence of ALU ops extracts the value with no branches (the merykitty
 trick). Everything stays in tenths of a degree as integers until printing.
 
-**Open addressing.** A fixed 32768-slot table with the key stored as an offset
-into the mapping rather than a copy, and each entry packed into exactly one
-64-byte cache line. Names are compared in full, so the result is correct rather
-than probabilistically correct.
+**Open addressing.** A fixed 32768-slot table, each entry packed into exactly
+one 64-byte cache line, holding the name's first 16 bytes inline. Names are
+compared in full, so the result is correct rather than probabilistically
+correct.
 
 **ILP.** Three independent cursors per segment, advanced round-robin, so the
 out-of-order engine has something to do while one stream misses cache.
@@ -161,16 +161,16 @@ End-to-end on 4 cores, 1e8 rows from `/dev/shm`, trimmed mean of 15 runs:
 
 | | |
 |--:|:--|
-| **0.567 s** | trimmed mean, end to end |
-| 176.3 M rows/s | end to end, startup included |
-| **4.16 s** | estimated for 1e9 rows |
+| **0.674 s** | trimmed mean, end to end |
+| 148.3 M rows/s | end to end, startup included |
+| **4.97 s** | estimated for 1e9 rows |
 
 Where that time goes:
 
 | | |
 |--:|:--|
-| 0.168 s | fixed — process startup, thread setup, table zeroing |
-| 0.399 s | scaling — the scan itself |
+| 0.197 s | fixed — process startup, thread setup, table zeroing |
+| 0.477 s | scaling — the scan itself |
 
 Only the scaling part is multiplied when estimating 1e9; `evaluate.sh` measures
 the fixed part against a one-row input rather than assuming it away.
@@ -180,6 +180,40 @@ worth optimising the way the top JVM entries used GraalVM native images.
 `src/OneBRC.jl` ends with a precompilation workload that bakes the hot path's
 native code into the package image, which took the fixed cost of a run from
 **819 ms to 174 ms**.
+
+### A caveat on every number below
+
+These were taken on a shared VM, and its speed varies between sessions by more
+than any single optimisation here is worth: identical code measured 0.567 s in
+one session and 0.723 s in another. Every table below is internally consistent
+— both arms measured back to back on the same host — but figures from different
+tables are not comparable, and none of them will match what you measure. Treat
+the percentages as the result and the absolute seconds as incidental.
+
+### The name never leaves the cache line
+
+The table used to hold its key as an offset into the mapping, so confirming a
+probe hit meant reading the name back out of a 13.8 GB region. Those reads are
+not cold — there are only as many first-occurrence addresses as there are
+stations — but they are a second working set competing with the table itself:
+at 10 000 stations that is another 10 000 cache lines.
+
+Storing the name's first 16 bytes in the entry removes it. The comparison then
+happens inside the cache line the probe has already loaded, and for a name of
+16 bytes or fewer it is exact, so the mapping is never touched a second time.
+That covers 95% of the 10 000-name station set and 99% of the reference
+generator's 413. Longer names keep the offset and fall through to comparing
+the remainder.
+
+| name key held as | 413 stations | 10 000 stations |
+|:--|--:|--:|
+| offset into the mapping | 0.723 s | 1.006 s |
+| **16 bytes inline** | **0.674 s** | **0.888 s** |
+| | −6.8% | −11.7% |
+
+As expected, it pays more where there are more distinct names to compete for
+cache — which is the case the challenge permits and the reference generator
+does not produce.
 
 ### Cache lines, not probe counts
 
