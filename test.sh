@@ -1,9 +1,7 @@
 #!/bin/bash
 #
-# Correctness gate, mirroring 1BRC's test.sh: for every sample, run the launch
-# script against it and diff the result with the expected output, normalising
-# both through tocsv.sh so a difference is reported per station rather than as
-# one enormous line.
+# Correctness gate, mirroring 1BRC's test.sh. Both sides go through tocsv.sh so
+# a difference is reported per station rather than as one enormous line.
 #
 # usage: ./test.sh ['test/samples/*.txt']
 set -uo pipefail

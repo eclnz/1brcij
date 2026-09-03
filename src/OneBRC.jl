@@ -1,35 +1,17 @@
 """
     OneBRC
 
-The One Billion Row Challenge in Julia: aggregate min/mean/max per weather
-station from a ~13.8 GB `<station>;<temperature>` text file.
-
-Layered so each optimisation can be read, tested and benchmarked on its own:
-
-| file            | layer                                                      |
-|:----------------|:-----------------------------------------------------------|
-| `reference.jl`  | the slow, obviously correct oracle                          |
-| `parse.jl`      | SWAR delimiter scanning, name hashing, branchless parsing   |
-| `table.jl`      | open-addressing table keyed by offsets into the mapping     |
-| `scan.jl`       | mmap segmentation, atomic work queue, ILP scan cursors      |
-| `output.jl`     | half-up rounding and the challenge's output format          |
-
-Load-bearing assumptions about the input, all of them from the challenge spec:
-
-  * little-endian machine — every SWAR trick reads byte 0 of memory as the
-    least significant byte of a `UInt64`;
-  * temperatures are always `-?d?d.d`, i.e. one fractional digit and at most
-    two integer digits;
-  * station names are shorter than 100 bytes and never contain `';'` or `'\\n'`;
-  * rows are well formed and newline terminated.
-
-Run it with:
+The One Billion Row Challenge: min/mean/max per weather station from a ~13.8 GB
+`<station>;<temperature>` file.
 
     julia -t auto -O3 --check-bounds=no --startup-file=no bin/brc.jl measurements.txt
 
-`@inbounds` is written explicitly in the hot paths as well, because
-`--check-bounds=no` is a startup flag and is not available to an app compiled
-with PackageCompiler.
+Assumptions, all from the challenge spec and all load-bearing: a little-endian
+machine; temperatures of the form `-?d?d.d`; station names under 100 bytes
+containing no `';'` or newline; well-formed, newline-terminated rows.
+
+`@inbounds` is also written out explicitly, since `--check-bounds=no` is a
+startup flag and is unavailable to a PackageCompiler app.
 """
 module OneBRC
 
@@ -45,21 +27,20 @@ include("output.jl")
 include("reference.jl")
 include("generate.jl")
 
-# The fast path may read up to 8 bytes past any offset it touches.  Inside an
-# mmap that is only safe because the kernel zero-fills the last partial page —
-# and it is not safe at all when the file size is an exact multiple of the page
-# size.  Rather than depend on that, carve a tail off the end of the file and
-# hand it to the byte-at-a-time parser: a few thousand rows out of a billion.
+# The fast path overreads up to 8 bytes. Inside an mmap that is only safe
+# because the kernel zero-fills the last partial page, and not safe at all when
+# the file size is a multiple of the page size. Rather than depend on that,
+# carve off a tail for the byte-at-a-time parser: a few thousand rows.
 const TAIL_SLACK = 1 << 16
 const MAX_ROW_BYTES = 1 << 12
 
 """
     fast_region_end(data, fsize) -> Int
 
-Row boundary at least `TAIL_SLACK` bytes before the end of the file, so that
-wide loads from any offset below it stay well inside the mapping.  Returns 0
-if no row boundary turns up in the search window, in which case the whole file
-goes down the slow path (only reachable on malformed input).
+Row boundary at least `TAIL_SLACK` bytes before the end of the file, so wide
+loads below it stay well inside the mapping. Returns 0 when the search window
+holds no row boundary, sending the whole file down the slow path — reachable
+only on malformed input.
 """
 function fast_region_end(data::Vector{UInt8}, fsize::Int)
     fsize <= TAIL_SLACK && return 0
@@ -76,7 +57,7 @@ end
 """
     run_file(path) -> Dict{String,Stat}
 
-Aggregate one measurements file.  Statistics are in tenths of a degree.
+Aggregate one measurements file. Statistics are in tenths of a degree.
 """
 function run_file(path::AbstractString)
     io = open(path, "r")
@@ -84,8 +65,8 @@ function run_file(path::AbstractString)
         fsize = Int(filesize(io))
         fsize == 0 && return Dict{String,Stat}()
         data = Mmap.mmap(io, Vector{UInt8}, fsize)
-        # `GC.@preserve` is not optional: without it the compiler may consider
-        # `data` dead while raw pointers into it are still live.
+        # Not optional: without it the compiler may treat `data` as dead while
+        # raw pointers into it are still live.
         return GC.@preserve data begin
             base = pointer(data)
             fend = fast_region_end(data, fsize)
@@ -106,9 +87,8 @@ usage: brc [options] <measurements file>
   --clean-exit    shut down normally instead of _exit(2) (see below)
   --time          report elapsed wall time on stderr
 
-By default the process ends with `_exit(2)` once the answer is flushed, which
-skips tearing down a 13.8 GB mapping — tens to hundreds of milliseconds that
-would otherwise be spent after the result is already known.
+By default the process ends with `_exit(2)` once the answer is flushed, skipping
+teardown of a 13.8 GB mapping after the result is already known.
 """
 
 function main(args::Vector{String})::Cint
@@ -162,16 +142,10 @@ function julia_main()::Cint
     end
 end
 
-# ---------------------------------------------------------------------------
-# Precompilation workload.
-#
-# 1BRC measures the launch script end to end, so compilation that happens on
-# the first call is measured too — the same problem the JVM entries solved with
-# GraalVM native images.  Exercising the pipeline here bakes the native code
-# for these specialisations into the package image, so `using OneBRC` is all
-# the run pays.  It must run *during* precompilation to be cached, hence the
-# `jl_generating_output` guard.
-# ---------------------------------------------------------------------------
+# 1BRC times the launch script end to end, so first-call compilation is
+# measured too — the problem the JVM entries solved with GraalVM native images.
+# Exercising the pipeline during precompilation bakes these specialisations into
+# the package image, taking a run's fixed cost from 819 ms to 174 ms.
 function _precompile_workload()
     rows = IOBuffer()
     for i in 1:400
@@ -196,8 +170,7 @@ end
 
 if ccall(:jl_generating_output, Cint, ()) == 1
     _precompile_workload()
-    # Methods that cannot be exercised without touching the filesystem still
-    # get their native code cached by an explicit directive.
+    # Methods needing the filesystem are cached by directive instead.
     precompile(run_file, (String,))
     precompile(main, (Vector{String},))
     precompile(julia_main, ())

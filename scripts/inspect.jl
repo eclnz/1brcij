@@ -1,13 +1,8 @@
 #!/usr/bin/env julia
-# The §11 profiling checklist, as something runnable.
+# usage: julia -t auto -O3 --check-bounds=no --startup-file=no scripts/inspect.jl
 #
-#   julia -t auto -O3 --check-bounds=no --startup-file=no scripts/inspect.jl
-#
-# Checks, in order of how much they matter:
-#   * no `Any`/`Union`/`Core.Box` in the hot path (boxing means allocation, and
-#     allocation in a billion-iteration loop means the GC is the bottleneck);
-#   * the hot path allocates exactly zero bytes;
-#   * `trailing_zeros` lowered to `tzcnt`, and the bounds checks are gone.
+# Checks the hot path is free of boxing, allocates nothing, and still lowers
+# `trailing_zeros` to `tzcnt`.
 include(joinpath(@__DIR__, "..", "src", "OneBRC.jl"))
 using .OneBRC
 using InteractiveUtils
@@ -38,8 +33,8 @@ function main()
                        (OneBRC.process_segment!, (OneBRC.Table, Ptr{UInt8}, Int, Int)),
                        (OneBRC.update!, (OneBRC.Table, Ptr{UInt8}, UInt64, Int, Int, Int64)))
         s = typed_output(f, types)
-        # `::Union{}` is the bottom type — an unreachable value, not an
-        # instability — so only a Union with members is a red flag.
+        # `::Union{}` is bottom, an unreachable value rather than an
+        # instability, so only a Union with members is a red flag.
         bad = count(w -> occursin(w, s), ("::Any", "Core.Box")) +
               count(r"::Union\{[^}]", s)
         println(rpad(string(nameof(f)), 18), bad == 0 ? "clean" : "SUSPECT")
@@ -51,8 +46,8 @@ function main()
     GC.@preserve SAMPLE begin
         p = pointer(SAMPLE)
         OneBRC.process_segment!(tbl, p, 0, NBYTES)          # compile
-        # The table is built outside the measured expression: the scan itself
-        # must allocate nothing at all, so there is no baseline to subtract.
+        # Built outside the measured expression: the scan must allocate
+        # nothing at all, so there is no baseline to subtract.
         fresh = OneBRC.Table()
         n = @allocated OneBRC.process_segment!(fresh, p, 0, NBYTES)
         println("process_segment! over $(NBYTES) bytes: $n bytes")

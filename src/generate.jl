@@ -1,9 +1,5 @@
-# ---------------------------------------------------------------------------
-# Measurement file generator, so the correctness harness has something to chew
-# on.  Mirrors the reference generator: a station is drawn uniformly and its
-# temperature from a normal distribution around the station's mean with a
-# standard deviation of 10, rounded to one fractional digit.
-# ---------------------------------------------------------------------------
+# Measurement file generator, mirroring the reference one: a station drawn
+# uniformly, its temperature normal around the station mean with sd 10.
 
 struct Station
     name::String
@@ -15,7 +11,7 @@ stations_path() = joinpath(dirname(@__DIR__), "data", "stations.csv")
 """
     load_stations([path]) -> Vector{Station}
 
-Read a `<name>;<mean temperature>` list, skipping `#` comment lines.
+Read a `<name>;<mean temperature>` list, skipping `#` comments.
 """
 function load_stations(path::AbstractString = stations_path())
     out = Station[]
@@ -43,9 +39,8 @@ end
 """
     generate(path, nrows; seed, stations) -> path
 
-Write `nrows` rows of `<station>;<temperature>` to `path`.  Temperatures are
-clamped to the documented `-99.9 .. 99.9` range so the generated file always
-satisfies the assumptions the fast parser makes.
+Write `nrows` rows of `<station>;<temperature>`. Temperatures are clamped to the
+documented `-99.9 .. 99.9` so the file always satisfies the parser's assumptions.
 """
 function generate(path::AbstractString, nrows::Integer;
                   seed::Integer = 20240101,

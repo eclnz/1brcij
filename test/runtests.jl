@@ -13,8 +13,7 @@ const SCRATCH = mktempdir()
 @testset "OneBRC" begin
 
 @testset "shift semantics" begin
-    # The whole tail-mask construction leans on Julia defining an over-shift
-    # as zero rather than as undefined behaviour.
+    # tail_mask leans on Julia defining an over-shift as zero, not UB.
     @test typemax(UInt64) >> 64 === UInt64(0)
     @test tail_mask(0) === UInt64(0)
     @test tail_mask(1) === 0x00000000000000ff
@@ -29,8 +28,7 @@ end
         @test m != 0
         @test trailing_zeros(m) >> 3 == i
     end
-    # 0x00 lanes must not be reported as ';', and high-bit bytes must not
-    # produce false positives.
+    # 0x00 lanes are not ';', and high-bit bytes are not false positives.
     @test match_bytes(0x0000000000000000, OneBRC.SEMIS) == 0
     @test match_bytes(0xffffffffffffffff, OneBRC.SEMIS) == 0
     @test match_bytes(0x8080803b80808080, OneBRC.SEMIS) != 0
@@ -40,8 +38,8 @@ end
 end
 
 @testset "branchless value parsing" begin
-    # Exhaustive over the documented range, in every layout, with trailing
-    # bytes deliberately filled with junk to prove they are ignored.
+    # Exhaustive over the documented range, in every layout, with junk in the
+    # trailing bytes to prove they are ignored.
     for tenths in -999:999
         s = OneBRC.fmt_tenths(tenths) * "\n"
         for junk in ("", "Abha;12.3\n", "\xff\xff\xff\xff\xff\xff\xff\xff")
@@ -78,24 +76,22 @@ end
         h2, nend2, k02, k12 = GC.@preserve buf2 scan_name(pointer(buf2), 0)
         @test (h, nend, k0, k1) == (h2, nend2, k02, k12)
     end
-    # distinct names must land on distinct hashes for the real station list
+    # distinct names, distinct hashes, over the real station list
     names = [s.name for s in load_stations()]
     hs = map(names) do name
         buf = Vector{UInt8}(codeunits(name * ";0.0\n")); append!(buf, zeros(UInt8, 16))
         GC.@preserve buf first(scan_name(pointer(buf), 0))
     end
     @test length(unique(hs)) == length(names)
-    # Slot collisions are expected and handled by probing; what matters is that
-    # there are few of them.  At 413 names in a 32768-slot table the birthday
-    # bound alone predicts about 2.6, so only a much larger number would mean
-    # the hash is at fault.
+    # Collisions are expected and handled by probing; only a lot of them would
+    # mean the hash is at fault. The birthday bound predicts ~2.6 here.
     slots = [Int(h & OneBRC.TABLE_MASK) for h in hs]
     @test length(names) - length(unique(slots)) <= 12
 end
 
 @testset "probe distance at the 10 000 station limit" begin
-    # The challenge caps the station set at 10 000 names.  A weak index
-    # derivation is a silent performance leak rather than a bug, so measure it.
+    # A weak index is a silent performance leak rather than a bug, so measure
+    # it at the challenge's 10 000-name cap.
     rng = Random.Xoshiro(7)
     alphabet = collect("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ -")
     names = Set{String}()
@@ -117,16 +113,14 @@ end
         total += d
         worst = max(worst, d)
     end
-    # Measured 0.235 average and 3..8 worst at TABLE_BITS = 15; the thresholds
-    # are loose enough to absorb a different random name set but tight enough
-    # to catch a hash that has stopped diffusing.
+    # Measured 0.235 average, 3..8 worst at TABLE_BITS = 15. Loose enough for a
+    # different random name set, tight enough to catch a hash gone bad.
     @test total / length(names) < 0.5
     @test worst < 24
 end
 
 @testset "name comparison beyond the inline key" begin
-    # name_tail_eq only compares from byte 16 on; the first 16 are the entry's
-    # inline key and are compared there.
+    # name_tail_eq starts at byte 16; the first 16 are the entry's inline key.
     long1 = "Alexandria-on-the-Sea"        # 21 bytes, shares its first 16
     long2 = "Alexandria-on-the-Bay"        # 21 bytes, differs at byte 19
     a = Vector{UInt8}(codeunits(long1 * "\n" * long2 * "\n" * long1 * "\n"))
@@ -185,8 +179,7 @@ end
 end
 
 @testset "end to end against the reference" begin
-    # A deliberately awkward file: repeated names, negative and positive
-    # values, all four value layouts, non-ASCII names, extremes.
+    # Repeated names, both signs, all four value layouts, non-ASCII, extremes.
     rows = String[]
     for (name, v) in [("Abha", "-23.0"), ("Abha", "59.2"), ("Abidjan", "0.0"),
                       ("Abéché", "-0.1"), ("Ürümqi", "99.9"), ("Ürümqi", "-99.9"),
@@ -233,12 +226,9 @@ end
 end
 
 @testset "table overflow fails loudly instead of hanging" begin
-    # Without a guard, a table with no empty slot left sends the probe loop
-    # round forever: not a wrong answer but a hang, which is worse.
-    #
-    # Driven through update! directly rather than through a file, because each
-    # thread owns a table and only ever sees the names in its own segments, so
-    # a multi-threaded run splits the names and no single table would fill.
+    # A full table would send the probe loop round forever: a hang, not a wrong
+    # answer. Driven through update! directly because each thread owns a table
+    # and sees only its own segments, so a threaded run would never fill one.
     function fill_table(n)
         io = IOBuffer()
         for i in 1:n

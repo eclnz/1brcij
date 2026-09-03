@@ -1,8 +1,7 @@
 #!/usr/bin/env julia
 # usage: julia -t auto -O3 --check-bounds=no scripts/bench.jl <file> [repeats]
 #
-# Reports steady-state time (compilation excluded) so that a change to the hot
-# loop is not hidden behind Julia's JIT.
+# Steady-state timing, compilation excluded.
 include(joinpath(@__DIR__, "..", "src", "OneBRC.jl"))
 using .OneBRC
 
@@ -12,7 +11,7 @@ function main(args)
     reps = length(args) >= 2 ? parse(Int, args[2]) : 5
     bytes = filesize(path)
 
-    stats = OneBRC.run_file(path)                    # warm up: compile everything
+    stats = OneBRC.run_file(path)                    # compile
     rows = sum(s.cnt for s in values(stats); init = 0)
 
     times = Float64[]

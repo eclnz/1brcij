@@ -1,8 +1,7 @@
 #!/bin/bash
 #
-# Create the input file on a RAM disk and point ./measurements.txt at it,
-# mirroring 1BRC's create_measurements.sh plus the RAM disk the official
-# evaluation ran from.
+# Create the input on a RAM disk and point ./measurements.txt at it, as the
+# official evaluation did.
 #
 # usage: ./create_measurements.sh [row count]
 set -euo pipefail
@@ -18,8 +17,8 @@ if [ ! -d "$RAMDISK" ]; then
   exit 1
 fi
 
-# ~13.8 bytes per row.  Refuse to start a run that cannot fit, rather than
-# filling the RAM disk and failing most of the way through.
+# ~14 bytes per row. Refuse up front rather than filling the disk and failing
+# most of the way through.
 need=$(( ROWS * 14 / 1024 ))
 free=$(df -k --output=avail "$RAMDISK" | tail -1)
 if [ "$need" -gt "$free" ]; then

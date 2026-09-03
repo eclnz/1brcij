@@ -1,14 +1,10 @@
 #!/bin/bash
 #
-# The launch script the benchmark times, mirroring 1BRC's
-# calculate_average_<fork>.sh: it reads ./measurements.txt (a symlink the
-# harness points at the input) and writes the result to stdout.
+# The script the benchmark times, mirroring 1BRC's calculate_average_<fork>.sh:
+# reads ./measurements.txt and writes the result to stdout.
 #
-# Everything the timing depends on lives here, because 1BRC measures the script
-# end to end — process startup included.  That is what made GraalVM native
-# images worth 3+ seconds to the JVM entries; the Julia equivalent is loading a
-# precompiled package image rather than JIT-compiling on every run, which is
-# what ./prepare.sh builds and what --project= below picks up.
+# 1BRC times this end to end, startup included, so --project= matters: it picks
+# up the package image ./prepare.sh builds instead of JIT-compiling every run.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

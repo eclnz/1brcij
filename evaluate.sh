@@ -1,18 +1,9 @@
 #!/bin/bash
 #
 # Benchmark harness, following 1BRC's evaluate.sh as closely as this machine
-# allows:
-#
-#   * the input is read from a RAM disk, so I/O is not part of the measurement
-#     (1BRC: "Programs are run from a RAM disk (i.o. the IO overhead for
-#     loading the file from disk is not relevant)");
-#   * the correctness suite must pass before anything is timed;
-#   * one full run over the measurements file first, as the warmup;
-#   * `hyperfine --warmup 0 --runs N` times the *launch script* end to end, so
-#     process startup counts;
-#   * execution is pinned with numactl --physcpubind;
-#   * the reported figure is the trimmed mean: drop the fastest and the slowest
-#     run, average the rest (the same jq expression 1BRC uses).
+# allows: input from a RAM disk so I/O is not measured, the correctness suite
+# as a gate, one full run as the warmup, then hyperfine timing the launch
+# script end to end under numactl pinning, reported as a trimmed mean.
 #
 # Deviations from the official setup are printed at the end of the run.
 #
@@ -31,7 +22,7 @@ for cmd in hyperfine jq numactl; do
   command -v "$cmd" >/dev/null || { echo "$cmd is not installed" >&2; exit 1; }
 done
 
-# 1BRC's evaluate.sh warns about both of these, because they add variance.
+# 1BRC warns about both: they add variance, not throughput.
 if [ -f /sys/devices/system/cpu/smt/active ] && [ "$(cat /sys/devices/system/cpu/smt/active)" != "0" ]; then
   echo "WARNING: SMT is enabled"
 fi
@@ -72,10 +63,9 @@ trimmed=$(jq -r '.results[0].times | sort_by(.|tonumber) | .[1:-1] | add / lengt
 rows=$(wc -l < "$INPUT")
 bytes=$(stat -c%s "$INPUT")
 
-# Process startup and thread setup do not grow with the row count, so scaling
-# the whole end-to-end time would inflate any extrapolation by that fixed cost
-# times the scale factor.  Measure it on a trivial input and extrapolate only
-# the part that actually scales.
+# Startup and thread setup do not grow with the row count, so scaling the whole
+# end-to-end time would inflate the estimate by that fixed cost times the scale
+# factor. Measure it on a trivial input and scale only the rest.
 fixed_json=$(mktemp /tmp/brc-fixed-XXXXXX.json)
 numactl --physcpubind="$CORES" \
   hyperfine --warmup 2 --runs 5 --style none --export-json "$fixed_json" \

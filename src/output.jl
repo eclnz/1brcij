@@ -1,16 +1,11 @@
-# ---------------------------------------------------------------------------
-# Layer 8 (output half): rounding and formatting.
-#
-# All aggregation happens in tenths of a degree as integers; floating point is
-# introduced here and nowhere else.
-# ---------------------------------------------------------------------------
+# Rounding and formatting. Aggregation is integer tenths throughout; floating
+# point enters here and nowhere else.
 
 """
     round_tenths(sum, cnt) -> Int64
 
-Mean of `sum/cnt` tenths, rounded half-up towards positive infinity, matching
-`Math.round` in the reference implementation.  Julia's `round` uses banker's
-rounding by default, which is off by a tenth on a handful of stations.
+Mean of `sum/cnt` tenths, rounded half-up to match Java's `Math.round`. Julia's
+`round` is banker's rounding, which is off by a tenth on a few stations.
 """
 @inline round_tenths(sum::Integer, cnt::Integer) =
     Int64(floor(Float64(sum) / Float64(cnt) + 0.5))
@@ -18,7 +13,7 @@ rounding by default, which is off by a tenth on a handful of stations.
 """
     fmt_tenths(t) -> String
 
-Render a value held in tenths with exactly one fractional digit.
+Render tenths with exactly one fractional digit.
 """
 function fmt_tenths(t::Integer)
     a = abs(Int64(t))
@@ -30,8 +25,8 @@ end
     format_result(stats) -> String
 
 Produce the challenge's `{Abha=-23.0/18.0/59.2, Abidjan=...}` line, sorted by
-station name.  Julia compares `String`s by their UTF-8 bytes, which for every
-name in the station list agrees with code point order.
+name. Julia orders `String`s by UTF-8 bytes, which agrees with code point order
+for every name in the station list.
 """
 function format_result(stats::AbstractDict{String,Stat})
     names = sort!(collect(keys(stats)))
