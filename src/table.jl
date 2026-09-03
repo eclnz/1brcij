@@ -2,27 +2,24 @@
 #
 # A Dict is unusable here: hashing a String key means materialising one, so an
 # allocation and a copy per row. This never resizes (the challenge caps the
-# station set at 10 000 names), packs an entry into a single cache line, and
-# keeps the name's first 16 bytes inline so the common case never reads the
-# name back out of the mapping.
+# station set at 10 000 names) and splits each slot in two: 32 hot bytes that
+# every row touches, and the name's offset and length, which only an insert, a
+# name of 16 bytes or more, and the final merge ever read. At the 10 000-name
+# cap that keeps the hot working set to 320 KB rather than 640 KB.
 
 const TABLE_BITS = 15
 const TABLE_SIZE = 1 << TABLE_BITS
 const TABLE_MASK = UInt64(TABLE_SIZE - 1)
 
-# Field offsets within one 64-byte entry. Each sits at its natural width and is
-# separately addressable, so nothing is packed or unpacked on the hot path.
-const ENTRY_BYTES = 64
-const O_HASH = 0     # UInt64
-const O_OFF  = 8     # Int64, name offset into the mapping
+# Field offsets within one 32-byte hot entry. Two entries share a cache line,
+# which suits linear probing: a miss brings its neighbour in for free.
+const ENTRY_BYTES = 32
+const O_KEY0 = 0     # UInt64, name bytes 1..8,  masked to length
+const O_KEY1 = 8     # UInt64, name bytes 9..16, masked to length
 const O_SUM  = 16    # Int64, tenths
-const O_KEY0 = 24    # UInt64, name bytes 1..8, masked to length
-const O_KEY1 = 32    # UInt64, name bytes 9..16, masked to length
-const O_MIN  = 40    # Int32
-const O_MAX  = 44    # Int32
-const O_CNT  = 48    # Int32, 0 marks an empty slot
-const O_LEN  = 52    # Int32
-# 56..63 spare, padding the entry to one cache line
+const O_CNT  = 24    # Int32, 0 marks an empty slot
+const O_MIN  = 28    # Int16, tenths fit in ±999
+const O_MAX  = 30    # Int16
 
 const INLINE_KEY_BYTES = 16
 
@@ -32,18 +29,20 @@ const INLINE_KEY_BYTES = 16
 const MAX_ENTRIES = TABLE_SIZE ÷ 2
 
 struct Table
-    data::Vector{Int64}
-    base::Ptr{UInt8}       # 64-byte aligned pointer into `data`
+    data::Vector{Int64}    # hot entries, 64-byte aligned
+    base::Ptr{UInt8}
+    off::Vector{Int}       # cold: name offset into the mapping, per slot
+    len::Vector{Int32}     # cold: name length, per slot
     nlive::Base.RefValue{Int}
 end
 
 function Table()
     # Julia guarantees no alignment for array data, and an entry straddling two
     # cache lines would defeat the point, so over-allocate and align by hand.
-    data = zeros(Int64, (ENTRY_BYTES ÷ 8) * (TABLE_SIZE + 1))
+    data = zeros(Int64, (ENTRY_BYTES ÷ 8) * (TABLE_SIZE + 2))
     p = Ptr{UInt8}(pointer(data))
-    pad = -Int(UInt(p)) & (ENTRY_BYTES - 1)
-    return Table(data, p + pad, Ref(0))
+    pad = -Int(UInt(p)) & 63
+    return Table(data, p + pad, zeros(Int, TABLE_SIZE), zeros(Int32, TABLE_SIZE), Ref(0))
 end
 
 @inline entry(t::Table, idx::Int) = t.base + idx * ENTRY_BYTES
@@ -76,39 +75,39 @@ end
 """
     update!(t, base, h, noff, nlen, k0, k1, v)
 
-Insert or accumulate one row. `k0`/`k1` are compared against the entry's inline
-key, in the cache line the probe has loaded anyway; for a name of 16 bytes or
-fewer that is exact, so only longer names reach `name_tail_eq`. Comparing the
-name rather than trusting the hash is what makes this correct rather than
-probably correct.
+Insert or accumulate one row.
+
+A name under 16 bytes leaves a zero byte in `k1` from the masking, and station
+names contain no NUL, so a key match settles it: the stored name must carry the
+same zero byte and therefore the same length. Only a name of 16 bytes or more
+is ambiguous against a longer one sharing its first 16, and those consult the
+cold length and offset. That is what keeps the length out of the hot entry.
 """
 @inline function update!(t::Table, base::Ptr{UInt8}, h::UInt64,
                          noff::Int, nlen::Int, k0::UInt64, k1::UInt64, v::Int64)
-    len32 = Int32(nlen)
     idx = Int(h & TABLE_MASK)
-    while true
+    @inbounds while true
         e = entry(t, idx)
         if ld(Int32, e, O_CNT) == 0
             n = t.nlive[] + 1          # once per station, not per row
             n > MAX_ENTRIES && table_full()
             t.nlive[] = n
-            st!(e, O_HASH, h)
-            st!(e, O_OFF, noff)
-            st!(e, O_SUM, v)
             st!(e, O_KEY0, k0)
             st!(e, O_KEY1, k1)
-            st!(e, O_MIN, Int32(v))
-            st!(e, O_MAX, Int32(v))
+            st!(e, O_SUM, v)
             st!(e, O_CNT, Int32(1))
-            st!(e, O_LEN, len32)
+            st!(e, O_MIN, Int16(v))
+            st!(e, O_MAX, Int16(v))
+            t.off[idx + 1] = noff
+            t.len[idx + 1] = Int32(nlen)
             return nothing
         elseif ld(UInt64, e, O_KEY0) == k0 && ld(UInt64, e, O_KEY1) == k1 &&
-               ld(Int32, e, O_LEN) == len32 &&
-               (nlen <= INLINE_KEY_BYTES ||
-                (ld(UInt64, e, O_HASH) == h &&
-                 name_tail_eq(base, ld(Int64, e, O_OFF), noff, nlen)))
-            v < ld(Int32, e, O_MIN) && st!(e, O_MIN, Int32(v))
-            v > ld(Int32, e, O_MAX) && st!(e, O_MAX, Int32(v))
+               (nlen < INLINE_KEY_BYTES ||
+                (t.len[idx + 1] == Int32(nlen) &&
+                 name_tail_eq(base, t.off[idx + 1], noff, nlen)))
+            v16 = Int16(v)
+            v16 < ld(Int16, e, O_MIN) && st!(e, O_MIN, v16)
+            v16 > ld(Int16, e, O_MAX) && st!(e, O_MAX, v16)
             st!(e, O_SUM, ld(Int64, e, O_SUM) + v)
             st!(e, O_CNT, ld(Int32, e, O_CNT) + Int32(1))
             return nothing
@@ -139,8 +138,8 @@ function merge_tables(tables, base::Ptr{UInt8})
         GC.@preserve t for i in 0:(TABLE_SIZE - 1)
             e = entry(t, i)
             ld(Int32, e, O_CNT) == 0 && continue
-            name = unsafe_string(base + ld(Int64, e, O_OFF), ld(Int32, e, O_LEN))
-            s = Stat(ld(Int32, e, O_MIN), ld(Int32, e, O_MAX),
+            name = unsafe_string(base + t.off[i + 1], t.len[i + 1])
+            s = Stat(ld(Int16, e, O_MIN), ld(Int16, e, O_MAX),
                      ld(Int64, e, O_SUM), ld(Int32, e, O_CNT))
             prev = get(out, name, nothing)
             out[name] = prev === nothing ? s : combine(prev, s)

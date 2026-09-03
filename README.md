@@ -164,17 +164,19 @@ one worth reading as a progression:
 
 | version | 413 stations | 10 000 stations |
 |:--|--:|--:|
-| original — struct-of-arrays, 131072 slots, key by offset | 0.401 s | 0.991 s |
-| + one cache line per entry | 0.369 s | 0.540 s |
-| + 32768 slots | 0.366 s | 0.544 s |
-| + 16-byte inline key | 0.337 s | 0.481 s |
-| + pipelined prefetch | 0.329 s | 0.447 s |
-| + five scan cursors | 0.305 s | 0.410 s |
-| + SIMD delimiter scan | **0.246 s** | **0.361 s** |
-| | **1.63× faster** | **2.75× faster** |
+| original — struct-of-arrays, 131072 slots, key by offset | 0.400 s | 1.060 s |
+| + one cache line per entry | 0.367 s | 0.552 s |
+| + 32768 slots | 0.367 s | 0.543 s |
+| + 16-byte inline key | 0.332 s | 0.479 s |
+| + pipelined prefetch | 0.330 s | 0.433 s |
+| + five scan cursors | 0.305 s | 0.409 s |
+| + SIMD delimiter scan | 0.248 s | 0.362 s |
+| + 32-byte hot entry | **0.236 s** | **0.341 s** |
+| | **1.69× faster** | **3.11× faster** |
 
-Nearly 2.8× on the case the spec permits, 1.6× on the case the reference
-generator actually produces. Everything up to the last row targets memory
+Over 3× on the case the spec permits, 1.7× on the case the reference generator
+actually produces. The spec's 10 000-station limit is the target; the 413-name
+set the generator ships is the easy case and is shown only for contrast. Everything up to the last row targets memory
 behaviour, which only bites once there are enough distinct stations to spill out
 of cache — hence the gap between the columns. The SIMD scan is the first change
 that reduces work per row rather than misses per row, which is why it is the
@@ -208,11 +210,43 @@ Measured as its own A/B, each arm run back to back:
 | pipelined prefetch | −3% | −4% |
 | five scan cursors instead of three | −4% | −3% |
 | SIMD delimiter scan | −19% | −14% |
+| 32-byte hot entry | −5% | −7% |
 
 Each was measured as its own A/B at four threads. Beware single-threaded
 microbenchmarks for the last two: both hide memory latency, and on one core
 there is far more latency to hide, so they read −10% and −16% there against the
 −3 to −4% they actually deliver.
+
+### Splitting the entry hot from cold
+
+Stripping the loop back a stage at a time says where the time goes. At 10 000
+stations, one core, 1e8 rows:
+
+| stage | share |
+|:--|--:|
+| probe and update the table | 53% |
+| find `;`, advance to the next row | 21% |
+| hash the name, build the keys | 17% |
+| parse the value | 9% |
+
+The table dominates, and it is also the whole of the gap between the two
+station sets: going from 413 to 10 000 names costs 0.560 s, and 0.506 s of that
+is the table stage alone. Everything else is flat.
+
+So shrink what the table touches. Only `key0`, `key1`, `sum`, `count`, `min`
+and `max` are read on every row, and in 32 bytes if min and max are `Int16` —
+tenths never leave ±999. The name's offset and length move to a separate array
+read only on insert, at merge, and for names of 16 bytes or more.
+
+Dropping the length from the hot entry works because a name under 16 bytes
+leaves a zero byte in `key1` from the masking, and station names contain no
+NUL: a key match then implies a length match. Exactly 16 bytes is the ambiguous
+case, and it takes the cold path. `test/runtests.jl` and a constructed hash
+collision both cover it.
+
+That halves the hot working set at the cap, from 640 KB to 320 KB, and is worth
+−7%. Less than halving the footprint might suggest — the win is bounded by how
+much of the 53% was misses rather than the dependent load itself.
 
 ### One vector compare instead of two SWAR words
 
