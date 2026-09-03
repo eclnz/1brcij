@@ -1,0 +1,11 @@
+The measurements-*.txt sample inputs and their expected measurements-*.out
+outputs in this directory are copied verbatim from the One Billion Row
+Challenge, https://github.com/gunnarmorling/1brc, at src/test/resources/samples.
+
+  Copyright 2023 The original authors
+  Licensed under the Apache License, Version 2.0
+  http://www.apache.org/licenses/LICENSE-2.0
+
+They are vendored so that `./test.sh` gates this implementation on exactly the
+same cases the challenge used, with no network access required.  `tocsv.sh` in
+the repository root comes from the same source under the same licence.

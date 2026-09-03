@@ -1,4 +1,9 @@
-measurements*.txt
+# generated inputs live at the repo root or on a RAM disk; the vendored
+# 1BRC samples under test/samples/ must NOT be ignored
+/measurements.txt
+/measurements*.txt
+/last-run.out
+/*-timing.json
 build/
 *.mem
 Manifest.toml

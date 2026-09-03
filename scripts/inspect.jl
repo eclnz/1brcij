@@ -51,11 +51,12 @@ function main()
     GC.@preserve SAMPLE begin
         p = pointer(SAMPLE)
         OneBRC.process_segment!(tbl, p, 0, NBYTES)          # compile
-        n = @allocated OneBRC.process_segment!(OneBRC.Table(), p, 0, NBYTES)
-        # the fresh Table itself is the only allowed allocation
-        base = @allocated OneBRC.Table()
-        println("process_segment! over $(NBYTES) bytes: $(n - base) bytes")
-        ok &= (n - base) == 0
+        # The table is built outside the measured expression: the scan itself
+        # must allocate nothing at all, so there is no baseline to subtract.
+        fresh = OneBRC.Table()
+        n = @allocated OneBRC.process_segment!(fresh, p, 0, NBYTES)
+        println("process_segment! over $(NBYTES) bytes: $n bytes")
+        ok &= n == 0
     end
 
     println("\n== native code for parse_value")

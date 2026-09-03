@@ -27,6 +27,12 @@ written explicitly in the hot paths as well.
 | `scripts/bench.jl` | steady-state timing with compilation excluded |
 | `scripts/inspect.jl` | type stability, zero-allocation and codegen checks |
 | `test/runtests.jl` | unit tests plus end-to-end diffs against the oracle |
+| `test/samples/` | the twelve official 1BRC sample inputs and expected outputs |
+| `prepare.sh` | ahead-of-time build, 1BRC's `prepare_<fork>.sh` analogue |
+| `calculate_average.sh` | the launch script the benchmark times |
+| `test.sh` | correctness gate against the official samples |
+| `create_measurements.sh` | generate the input onto a RAM disk |
+| `evaluate.sh` | the 1BRC benchmark methodology (see below) |
 
 ## What each layer does
 
@@ -86,19 +92,80 @@ From the challenge spec, and all of them load bearing:
 Because aggregation is integer-only, a station whose values are all in
 `[-0.05, 0)` prints `0.0` where the Java reference prints `-0.0`.
 
+## Benchmarking the way 1BRC did
+
+The official evaluation is deliberately not a cold-file measurement. From the
+1BRC README:
+
+> Programs are run from a RAM disk (i.o. the IO overhead for loading the file
+> from disk is not relevant), using 8 cores of the machine.
+
+`evaluate.sh` reproduces that methodology as closely as this machine allows:
+
+```
+./prepare.sh                        # ahead-of-time build, so compilation is not timed
+./create_measurements.sh 100000000  # input generated onto /dev/shm
+./evaluate.sh 10                    # correctness gate, warmup, hyperfine, trimmed mean
+```
+
+| 1BRC | here |
+|:--|:--|
+| input on a RAM disk | `/dev/shm` |
+| `numactl --physcpubind=0-7` | `numactl --physcpubind=0-3` (4 cores available) |
+| `hyperfine --warmup 0 --runs N` on the launch script | same |
+| end-to-end timing, process startup included | same |
+| `test.sh` against the samples first, as the warmup | same, against the same samples |
+| trimmed mean, fastest and slowest dropped | same jq expression |
+| SMT and cpufreq boost warnings | same |
+| 1e9 rows / 13.8 GB | 1e8 rows / 1.285 GiB — 13.8 GB does not fit in a 15 GB RAM disk |
+
+`test.sh` runs the twelve official sample files vendored in `test/samples/`,
+including `measurements-rounding` and `measurements-10000-unique-keys`,
+normalising both sides through 1BRC's own `tocsv.sh`. All twelve pass.
+
 ## Numbers
 
-4 cores (Ubuntu 24.04, Julia 1.12), 10 M rows / 0.128 GiB, warm page cache,
-steady state:
+End-to-end on 4 cores, 1e8 rows from `/dev/shm`, trimmed mean of 10 runs:
 
-| threads | best | throughput |
+| | |
+|--:|:--|
+| **0.621 s** | trimmed mean, end to end |
+| 161 M rows/s | end to end, startup included |
+| **6.21 s** | extrapolated to 1e9 rows |
+
+Where that time goes:
+
+| | |
+|--:|:--|
+| 0.174 s | process startup — Julia runtime plus the package image |
+| 0.355 s | the scan itself (282 M rows/s, 3.6 GiB/s) |
+| ~0.09 s | thread startup and zeroing 4 × 5.2 MB of thread-local tables |
+
+Because 1BRC times the launch script rather than the aggregation, startup is
+worth optimising: `src/OneBRC.jl` ends with a precompilation workload that
+bakes the hot path's native code into the package image, which took the fixed
+cost of a run from **819 ms to 174 ms**. This is the same pressure that pushed
+the top JVM entries onto GraalVM native images.
+
+The 5.2 MB-per-thread table is the next thing that harness exposes and an
+in-process benchmark hides: `TABLE_BITS` is sized for the 10 000-station cap,
+and every fresh process pays to fault in and zero 21 MB of it.
+
+Scan throughput alone, measured in-process with `scripts/bench.jl`
+(compilation and startup excluded):
+
+| threads | 1e7 rows | 1e8 rows |
 |--:|--:|--:|
-| 1 | 0.142 s | 70 M rows/s |
-| 2 | 0.065 s | 154 M rows/s |
-| 4 | 0.034 s | 290 M rows/s (3.7 GiB/s) |
+| 1 | 0.142 s (70 M rows/s) | |
+| 2 | 0.065 s (154 M rows/s) | |
+| 4 | 0.034 s (290 M rows/s) | 0.355 s (282 M rows/s) |
 
-The three ILP cursors are worth ~7% single-threaded and ~1% at 4 threads, where
-the loop is already bandwidth bound — the guide's "last several percent".
+Throughput holds as the file grows past cache, so the extrapolation to 1e9 is
+close to linear. The three ILP cursors are worth ~7% single-threaded and ~1% at
+4 threads, where the loop is already bandwidth bound.
+
+For reference, the official results on 8 cores of a 32-core EPYC 7502P:
+1.535 s for the winning entry, and 0.323 s on all 32 cores / 64 threads.
 
 ## Tests
 

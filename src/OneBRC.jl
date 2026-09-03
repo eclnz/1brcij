@@ -162,4 +162,47 @@ function julia_main()::Cint
     end
 end
 
+# ---------------------------------------------------------------------------
+# Precompilation workload.
+#
+# 1BRC measures the launch script end to end, so compilation that happens on
+# the first call is measured too — the same problem the JVM entries solved with
+# GraalVM native images.  Exercising the pipeline here bakes the native code
+# for these specialisations into the package image, so `using OneBRC` is all
+# the run pays.  It must run *during* precompilation to be cached, hence the
+# `jl_generating_output` guard.
+# ---------------------------------------------------------------------------
+function _precompile_workload()
+    rows = IOBuffer()
+    for i in 1:400
+        print(rows, "Station", i % 37, ';', i % 2 == 0 ? "-" : "",
+              (i % 90) + 9, '.', i % 10, '\n')
+    end
+    data = take!(rows)
+    stop = something(findlast(==(NEWLINE), data))
+    append!(data, zeros(UInt8, 64))
+    stats = GC.@preserve data begin
+        p = pointer(data)
+        tbl = Table()
+        process_segment!(tbl, p, 0, stop)
+        scan_serial!(tbl, p, 0, stop)
+        merge_tables([tbl], p)
+    end
+    accumulate_slow!(stats, data, 0, stop)
+    fast_region_end(data, stop)
+    format_result(stats)
+    return nothing
+end
+
+if ccall(:jl_generating_output, Cint, ()) == 1
+    _precompile_workload()
+    # Methods that cannot be exercised without touching the filesystem still
+    # get their native code cached by an explicit directive.
+    precompile(run_file, (String,))
+    precompile(main, (Vector{String},))
+    precompile(julia_main, ())
+    precompile(baseline, (String,))
+    precompile(scan_parallel, (Ptr{UInt8}, Int))
+end
+
 end # module
