@@ -56,7 +56,7 @@ ever built.
 fixed sequence of ALU ops extracts the value with no branches (the merykitty
 trick). Everything stays in tenths of a degree as integers until printing.
 
-**Open addressing.** A fixed 131072-slot table with the key stored as an offset
+**Open addressing.** A fixed 32768-slot table with the key stored as an offset
 into the mapping rather than a copy, and each entry packed into exactly one
 64-byte cache line. Names are compared in full, so the result is correct rather
 than probabilistically correct.
@@ -161,17 +161,19 @@ End-to-end on 4 cores, 1e8 rows from `/dev/shm`, trimmed mean of 15 runs:
 
 | | |
 |--:|:--|
-| **0.573 s** | trimmed mean, end to end |
-| 174.5 M rows/s | end to end, startup included |
-| **5.73 s** | extrapolated to 1e9 rows |
+| **0.567 s** | trimmed mean, end to end |
+| 176.3 M rows/s | end to end, startup included |
+| **4.16 s** | estimated for 1e9 rows |
 
 Where that time goes:
 
 | | |
 |--:|:--|
-| 0.174 s | process startup — Julia runtime plus the package image |
-| ~0.31 s | the scan itself |
-| ~0.09 s | thread startup and zeroing the thread-local tables |
+| 0.168 s | fixed — process startup, thread setup, table zeroing |
+| 0.399 s | scaling — the scan itself |
+
+Only the scaling part is multiplied when estimating 1e9; `evaluate.sh` measures
+the fixed part against a one-row input rather than assuming it away.
 
 Because 1BRC times the launch script rather than the aggregation, startup is
 worth optimising the way the top JVM entries used GraalVM native images.
@@ -196,14 +198,22 @@ Measured end to end, 1e8 rows, 4 cores:
 |:--|--:|--:|--:|--:|
 | struct-of-arrays | 17 | 5.0 | 0.595 s | 1.286 s |
 | struct-of-arrays | 15 | 1.25 | 0.598 s | 0.901 s |
-| **one cache line per entry** | 17 | 8.0 | 0.583 s | **0.860 s** |
-| one cache line per entry | 15 | 2.0 | 0.586 s | 0.763 s |
+| one cache line per entry | 17 | 8.0 | 0.583 s | 0.860 s |
+| **one cache line per entry** | **15** | **2.0** | **0.560 s** | **0.774 s** |
 
 The packed entry is *larger* — 64 bytes against 40 — and uses more memory per
 table, and is still 33% faster on the case the spec actually permits. That is
 the clearest evidence that the cost here is lines touched, not bytes held and
 not probes walked. The two fixes overlap rather than compound: together they
-are worth 41%, not the 63% adding them would suggest.
+are worth 40%, not the 63% adding them would suggest. Both are in; the last row
+is the current configuration.
+
+Sizing the table down narrows the margin over the challenge's 10 000-station
+cap from 13x to 3.3x, so `update!` now refuses past half full. The table never
+resizes, and without that check a file with more distinct stations than slots
+would send the probe loop looking for an empty one forever — a hang rather than
+a wrong answer, which is the worse way to fail. The check costs nothing per
+row: it runs once per distinct station, on the insert branch only.
 
 At 413 stations, the station set the reference generator produces, every
 variant lands within the ±7% run-to-run noise of this machine. The whole effect

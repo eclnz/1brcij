@@ -14,8 +14,8 @@
 # Each thread owns a table outright; nothing here is shared or synchronised.
 # ---------------------------------------------------------------------------
 
-const TABLE_BITS = 17
-const TABLE_SIZE = 1 << TABLE_BITS          # 131072 slots: load factor < 0.08
+const TABLE_BITS = 15
+const TABLE_SIZE = 1 << TABLE_BITS          # 32768 slots: load factor 0.31 at the cap
 const TABLE_MASK = UInt64(TABLE_SIZE - 1)
 
 # One entry occupies exactly one 64-byte cache line: seven Int64 fields and a
@@ -34,9 +34,16 @@ const E_SUM  = 5
 const E_CNT  = 6                          # 0 marks an empty slot
 # slot 7 is padding to fill the line
 
+# The table never resizes, so a file with more distinct stations than it has
+# slots would leave the probe loop searching forever for an empty one: not a
+# wrong answer but a hang, which is a worse way to fail.  Refuse past half full,
+# which also keeps linear probing in the regime where it is fast.
+const MAX_ENTRIES = TABLE_SIZE ÷ 2
+
 struct Table
     data::Vector{Int64}    # backing store, over-allocated by one entry
     base::Ptr{Int64}       # 64-byte aligned pointer into `data`
+    nlive::Base.RefValue{Int}
 end
 
 function Table()
@@ -46,8 +53,13 @@ function Table()
     data = zeros(Int64, ENTRY_WORDS * (TABLE_SIZE + 1))
     p = pointer(data)
     pad = (-Int(UInt(p)) & (ENTRY_BYTES - 1)) ÷ 8
-    return Table(data, p + 8 * pad)
+    return Table(data, p + 8 * pad, Ref(0))
 end
+
+@noinline table_full() = error(
+    "more than $MAX_ENTRIES distinct station names in one thread's table; " *
+    "the challenge caps the station set at 10000, so either the input is out " *
+    "of spec or TABLE_BITS (currently $TABLE_BITS) needs raising")
 
 # `cnt == 0` is the empty marker and an insert writes min and max outright, so
 # zeroed memory is a valid empty table — there are no sentinels to fill in.
@@ -92,6 +104,11 @@ are safe to index on directly.
     while true
         e = entry(t, idx)
         if field(e, E_CNT) == 0
+            # Only reached once per distinct station, so the bookkeeping costs
+            # nothing per row.
+            n = t.nlive[] + 1
+            n > MAX_ENTRIES && table_full()
+            t.nlive[] = n
             setfield(e, E_HASH, hi)
             setfield(e, E_OFF, noff)
             setfield(e, E_LEN, nlen)
