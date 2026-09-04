@@ -1,8 +1,8 @@
 # Scanning primitives and the branchless value parser.
 #
-# Little-endian only. Offsets are 0-based bytes from a Ptr{UInt8}, never the
-# 1-based `unsafe_load(p, i)`. Callers must allow an 8-byte overread from any
-# offset touched here; `fast_region_end` carves off a file tail so that holds.
+# Little-endian only. Indices are 1-based into a `Vector{UInt8}`. Callers must
+# allow an 8-byte overread from any index touched here; `fast_region_end` carves
+# off a file tail so that holds.
 
 const ONES  = 0x0101010101010101
 const HIGHS = 0x8080808080808080
@@ -10,21 +10,41 @@ const SEMIS = 0x3b3b3b3b3b3b3b3b
 const NEWLINE = 0x0a
 const SEMICOLON = 0x3b
 
-"""Bytewise compare of the 16 bytes at `p` against `c`, as a 16-bit mask."""
-@inline function match16(p::Ptr{UInt8}, c::UInt8)
+"""
+    load8(data, i) -> UInt64
+
+Little-endian 8-byte load. LLVM folds the shift-and-or chain back into a single
+unaligned `mov`, so this is free — except in `finish_row!`, which says why.
+"""
+@inline function load8(data::Vector{UInt8}, i::Int)
+    @inbounds return UInt64(data[i])      | UInt64(data[i + 1]) << 8  |
+           UInt64(data[i + 2]) << 16 | UInt64(data[i + 3]) << 24 |
+           UInt64(data[i + 4]) << 32 | UInt64(data[i + 5]) << 40 |
+           UInt64(data[i + 6]) << 48 | UInt64(data[i + 7]) << 56
+end
+
+"""
+    match16(a, b, c) -> UInt32
+
+Bytewise compare of two words against `c`, as a 16-bit mask. Julia has no
+portable spelling for `vpcmpeqb`, hence the IR. Taking the words by value rather
+than by address keeps it off raw pointers: the caller has loaded them anyway.
+"""
+@inline function match16(a::UInt64, b::UInt64, c::UInt8)
     Base.llvmcall(("""
-        define i32 @entry(i64 %p, i8 %c) #0 {
-            %ptr = inttoptr i64 %p to ptr
-            %v = load <16 x i8>, ptr %ptr, align 1
+        define i32 @entry(i64 %a, i64 %b, i8 %c) #0 {
+            %p0 = insertelement <2 x i64> undef, i64 %a, i32 0
+            %p1 = insertelement <2 x i64> %p0, i64 %b, i32 1
+            %v  = bitcast <2 x i64> %p1 to <16 x i8>
             %s0 = insertelement <16 x i8> undef, i8 %c, i32 0
             %sp = shufflevector <16 x i8> %s0, <16 x i8> undef, <16 x i32> zeroinitializer
-            %e = icmp eq <16 x i8> %v, %sp
-            %m = bitcast <16 x i1> %e to i16
-            %r = zext i16 %m to i32
+            %e  = icmp eq <16 x i8> %v, %sp
+            %m  = bitcast <16 x i1> %e to i16
+            %r  = zext i16 %m to i32
             ret i32 %r
         }
         attributes #0 = { alwaysinline }
-        """, "entry"), UInt32, Tuple{UInt64, UInt8}, UInt64(p), c)
+        """, "entry"), UInt32, Tuple{UInt64, UInt64, UInt8}, a, b, c)
 end
 
 """Set 0x80 in each byte lane of `word` equal to `pattern`."""
@@ -36,7 +56,7 @@ end
 """Mask keeping the low `nbytes` bytes. A 64-bit shift is 0 in Julia, unlike C."""
 @inline tail_mask(nbytes::Int) = typemax(UInt64) >> (64 - 8 * nbytes)
 
-"""A located name: its hash, the offset of its `';'`, and its first 16 bytes."""
+"""A located name: its hash, the index of its `';'`, and its first 16 bytes."""
 struct Name
     hash::UInt64
     stop::Int
@@ -54,30 +74,30 @@ const HASH_PRIME = 0x00000100000001b3   # odd, so the multiply stays invertible
 @inline finalize_hash(h::UInt64) = h ⊻ (h >> 29)
 
 """
-    scan_name(base, pos) -> Name
+    scan_name(data, pos) -> Name
 
 Locate and hash the name in one pass. One vector compare covers any name under
 16 bytes, which is 95% of the station set; the key masking is branchless.
 """
-@inline function scan_name(base::Ptr{UInt8}, pos::Int)
-    m = match16(base + pos, SEMICOLON)
-    w0 = unsafe_load(Ptr{UInt64}(base + pos))
-    w1 = unsafe_load(Ptr{UInt64}(base + pos + 8))
+@inline function scan_name(data::Vector{UInt8}, pos::Int)
+    w0 = load8(data, pos)
+    w1 = load8(data, pos + 8)
+    m = match16(w0, w1, SEMICOLON)
     if m != 0
         n = Int(trailing_zeros(m))
         k0 = w0 & tail_mask(ifelse(n > 8, 8, n))
         k1 = w1 & tail_mask(ifelse(n > 8, n - 8, 0))
         return Name(finalize_hash(mix(mix(HASH_BASIS, k0), k1)), pos + n, k0, k1)
     end
-    return scan_name_long(base, pos, w0, w1)
+    return scan_name_long(data, pos, w0, w1)
 end
 
 """Names of 16 bytes or more. `@noinline` keeps the loop out of the path above."""
-@noinline function scan_name_long(base::Ptr{UInt8}, pos::Int, w0::UInt64, w1::UInt64)
+@noinline function scan_name_long(data::Vector{UInt8}, pos::Int, w0::UInt64, w1::UInt64)
     h = mix(mix(HASH_BASIS, w0), w1)
     p = pos + 16
     while true
-        word = unsafe_load(Ptr{UInt64}(base + p))
+        word = load8(data, p)
         m = match_bytes(word, SEMIS)
         if m != 0
             n = trailing_zeros(m) >> 3

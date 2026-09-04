@@ -28,10 +28,10 @@ function main()
 
     println("== type stability")
     for (f, types) in ((OneBRC.parse_value, (UInt64,)),
-                       (OneBRC.scan_name, (Ptr{UInt8}, Int)),
-                       (OneBRC.process_row!, (OneBRC.Table, Ptr{UInt8}, Int)),
-                       (OneBRC.process_segment!, (OneBRC.Table, Ptr{UInt8}, Int, Int)),
-                       (OneBRC.update!, (OneBRC.Table, Ptr{UInt8}, UInt64, Int, Int, Int64)))
+                       (OneBRC.scan_name, (Vector{UInt8}, Int)),
+                       (OneBRC.process_row!, (OneBRC.Table, Vector{UInt8}, Int)),
+                       (OneBRC.process_segment!, (OneBRC.Table, Vector{UInt8}, Int, Int)),
+                       (OneBRC.update!, (OneBRC.Table, Vector{UInt8}, Int, OneBRC.Name, Int64)))
         s = typed_output(f, types)
         # `::Union{}` is bottom, an unreachable value rather than an
         # instability, so only a Union with members is a red flag.
@@ -43,16 +43,13 @@ function main()
 
     println("\n== allocation in the hot path")
     tbl = OneBRC.Table()
-    GC.@preserve SAMPLE begin
-        p = pointer(SAMPLE)
-        OneBRC.process_segment!(tbl, p, 0, NBYTES)          # compile
-        # Built outside the measured expression: the scan must allocate
-        # nothing at all, so there is no baseline to subtract.
-        fresh = OneBRC.Table()
-        n = @allocated OneBRC.process_segment!(fresh, p, 0, NBYTES)
-        println("process_segment! over $(NBYTES) bytes: $n bytes")
-        ok &= n == 0
-    end
+    OneBRC.process_segment!(tbl, SAMPLE, 1, NBYTES)        # compile
+    # Built outside the measured expression: the scan must allocate nothing at
+    # all, so there is no baseline to subtract.
+    fresh = OneBRC.Table()
+    n = @allocated OneBRC.process_segment!(fresh, SAMPLE, 1, NBYTES)
+    println("process_segment! over $(NBYTES) bytes: $n bytes")
+    ok &= n == 0
 
     println("\n== native code for parse_value")
     io = IOBuffer()

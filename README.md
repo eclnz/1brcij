@@ -7,7 +7,7 @@ per weather station from a 13.8 GB `<station>;<temperature>` file.
 ./benchmark.sh          # prerequisites, build, generate onto a RAM disk, evaluate
 ```
 
-**3.10 s** for 1e9 rows on four cores, 323 M rows/s, end to end with process
+**3.00 s** for 1e9 rows on four cores, 334 M rows/s, end to end with process
 startup counted. The winning Java entry ran 1.535 s on eight cores of a 32-core
 EPYC 7502P; its sequential baseline, 4:49.
 
@@ -20,20 +20,18 @@ EPYC 7502P; its sequential baseline, 4:49.
 | `src/scan.jl` | mmap segmentation, work queue, pipelined scan cursors |
 | `src/output.jl` | half-up rounding and the challenge's output format |
 | `src/reference.jl` | the slow oracle everything is diffed against |
-| `src/safe.jl` | the same algorithm in ordinary Julia, for comparison |
 | `src/generate.jl` | measurement file generator |
 | `bin/brc.jl` | CLI — `--check` diffs against the oracle, `--time` reports wall time |
 | `scripts/bench.jl` | steady-state timing, compilation excluded |
 | `scripts/inspect.jl` | type stability, zero-allocation and codegen checks |
-| `scripts/safety.jl` | pointers and intrinsics against ordinary Julia |
 | `test/samples/` | the twelve official 1BRC samples and expected outputs |
 | `benchmark.sh` | the whole run in one command |
 | `prepare.sh` `calculate_average.sh` `test.sh` `create_measurements.sh` `evaluate.sh` | the 1BRC harness scripts |
 
 ## How it works
 
-The file is mmapped and read through a raw `Ptr{UInt8}` with 0-based offsets,
-inside `GC.@preserve`. It is cut into 2 MiB segments handed out by a single
+The file is mmapped into a `Vector{UInt8}` and read by ordinary indexing under
+`@inbounds`. It is cut into 2 MiB segments handed out by a single
 atomic counter — the only shared mutable state. Segment starts are arithmetic;
 each thread repairs its own boundary by skipping to the next row, and a
 segment's stop is the same function applied to the next segment, so neighbours
@@ -53,7 +51,8 @@ Names are compared in full, so the result is correct rather than probably so.
 Five scan cursors run per segment. Row *n+1*'s position is unknown until row
 *n* is parsed, so one cursor is a single dependency chain; five give the
 out-of-order engine something to overlap. All five hash before any of them
-parse, which puts four rows of work between each table prefetch and its use.
+parse, which puts four rows of work between a probe's address becoming known
+and the probe itself.
 
 ## What mattered
 
@@ -72,7 +71,11 @@ end to end, input on 2 MiB pages except where noted:
 | + five scan cursors | 4.026 s | −4.5% |
 | + SIMD delimiter scan | 3.174 s | −21.2% |
 | + 32-byte hot entry | 3.086 s | −2.8% |
-| HEAD, 4 KiB pages | 3.408 s | +10.1% |
+| same, 4 KiB pages | 3.408 s | +10.1% |
+
+Moving the hot path off raw pointers onto ordinary `Vector{UInt8}` indexing came
+after that run and costs a further **1.9%** end to end — 2.942 s against
+2.998 s, paired, on a faster host. The next section breaks that down.
 
 Against the reference oracle in the same process: **22× on one core, 86× on
 four**.
@@ -85,9 +88,11 @@ out not to be what costs. A packed 64-byte entry touches one cache line where
 seven parallel arrays touch seven. The packed entry is *larger* and still much
 faster.
 
-**Distance, not instructions.** Prefetching the table entry buys nothing on its
-own, and pipelining the loop buys nothing on its own; together they are worth
-10%, because only then does each prefetch have enough work in front of it.
+**Distance, not instructions.** Prefetching the table entry bought nothing on
+its own, and pipelining the loop bought nothing on its own; together they were
+worth 10%, because only then did each prefetch have enough work in front of it.
+The prefetch is gone now — see below — and the distance it needed is why there
+are still five cursors rather than three.
 
 **The row above going the wrong way is not an error.** 32768 slots measured
 neutral on the 413-station set and worth 11% at 10 000. This is the 413-station
@@ -100,35 +105,46 @@ Things that measured *worse* and were dropped: branchless min/max, a 24-byte
 inline key, fusing count/min/max into one word, and `MADV_POPULATE_READ`. Three
 of the four reduced operation counts at the cost of parallelism.
 
-### What the pointer machinery buys
+### Ordinary Julia, and what the intrinsics buy
 
-`src/safe.jl` is the same algorithm in ordinary Julia — `Vector{UInt8}` indexing
-instead of raw pointers, no `unsafe_load`, no `llvmcall`, and `@inbounds` used
-as any Julia program would. 1e8 rows, four cores, best of seven, three runs:
+The hot path is `Vector{UInt8}` indexing under `@inbounds`, not raw pointers.
+It got there from a pointer implementation, so the cost of each step back is
+measured. 1e8 rows, four cores, best of seven, three paired runs:
 
 | | 413 stations | 10 000 stations |
 |:--|--:|--:|
-| pointers and intrinsics (shipped) | 0.268 s | 0.377 s |
-| ordinary Julia | 0.415 s | 0.546 s |
-| | **1.55×** | **1.45×** |
+| raw pointers throughout | 0.271 s | 0.373 s |
+| ordinary Julia (shipped) | 0.283 s | 0.408 s |
+| — without the widened value load | 0.325 s | 0.452 s |
+| — without `match16` either | 0.415 s | 0.546 s |
 
-Two of the ingredients turn out to be free:
+At 1e9 rows the scan itself is 3.5% off the pointer implementation and the whole
+run 1.9%, and it gives up nothing else: same output, same allocations, same
+thread scaling.
 
-**`unsafe_load` buys nothing.** Assembling a `UInt64` from eight
-`Vector{UInt8}` indexes compiles to a single `mov rax, qword ptr [rax + rsi - 1]`
-— the identical instruction — because LLVM widens the shift-and-or pattern.
+**Bounds checks cost nothing**, given `@inbounds`. The safe path times the same
+with and without `--check-bounds=no`, which is what you want to see: the
+annotations cover the hot path.
 
-**Bounds checks cost nothing either**, given `@inbounds`. The safe version times
-the same with and without `--check-bounds=no`, which is what you want to see:
-the annotations cover the hot path.
+**Assembling a `UInt64` from eight indexes is usually free.** LLVM folds the
+shift-and-or chain back into one unaligned `mov` — the same instruction
+`unsafe_load` emits. Usually: `parse_value` splits its word into a narrow use
+(finding the `.`) and a wide one (the digit multiply), and LLVM then
+reassociates the chain to serve the narrow half instead of folding it, leaving
+eight `movzx` per row. That one site is 13%, and is the only `unsafe_load` left.
+Three different spellings of the load produce identical code, so it is the
+consumer, not the load.
 
-So the 1.5× is what `llvmcall` unlocks — the 16-byte `vpcmpeqb` delimiter scan
-and the table prefetch, neither reachable from ordinary Julia — plus whatever
-the array-object indirection costs against a pointer held in a register. Those
-two are not cleanly separable here.
+**`match16` is worth 22%**, and is the one thing here that reduces work per row
+rather than misses per row. `vpcmpeqb` has no portable spelling in Julia, hence
+the `llvmcall`. Passing the two words by value rather than by address keeps it
+off raw pointers — and reads the 16 bytes once, where the pointer version read
+them twice, once as a vector and once as two scalars.
 
-`scripts/safety.jl` reproduces the table; `test/runtests.jl` holds the two
-implementations to identical output.
+**The prefetch did not survive the move.** Explicit table prefetching is worth
+2% at 10 000 stations and costs 6% at 413, where the table already sits in L2 —
+so it is gone, and the five cursors carry the latency hiding alone. It earns its
+keep in the pointer version, whose shorter loop body has less to overlap.
 
 ### Thread scaling
 

@@ -46,7 +46,7 @@ end
         for junk in ("", "Abha;12.3\n", "\xff\xff\xff\xff\xff\xff\xff\xff")
             bytes = Vector{UInt8}(codeunits(s * junk))
             append!(bytes, zeros(UInt8, 16))
-            word = GC.@preserve bytes unsafe_load(Ptr{UInt64}(pointer(bytes)))
+            word = OneBRC.load8(bytes, 1)
             v, adv = parse_value(word)
             @test v == tenths
             @test adv == length(codeunits(s))
@@ -61,13 +61,13 @@ end
                  "Alexandra", "Alexandria", repeat("x", 99)]
         buf = Vector{UInt8}(codeunits(name * ";12.3\n"))
         append!(buf, zeros(UInt8, 16))
-        nm = GC.@preserve buf scan_name(pointer(buf), 0)
+        nm = scan_name(buf, 1)
         h, nend, k0, k1 = nm.hash, nm.stop, nm.key0, nm.key1
-        @test nend == length(codeunits(name))
+        @test nend == length(codeunits(name)) + 1
         # the inline key must be the name's first 16 bytes, masked to length
         raw = Vector{UInt8}(codeunits(name)); append!(raw, zeros(UInt8, 16))
-        want0 = GC.@preserve raw unsafe_load(Ptr{UInt64}(pointer(raw)))
-        want1 = GC.@preserve raw unsafe_load(Ptr{UInt64}(pointer(raw) + 8))
+        want0 = OneBRC.load8(raw, 1)
+        want1 = OneBRC.load8(raw, 9)
         n = length(codeunits(name))
         @test k0 == (n >= 8 ? want0 : want0 & OneBRC.tail_mask(n))
         @test k1 == (n >= 16 ? want1 : n <= 8 ? UInt64(0) :
@@ -75,14 +75,14 @@ end
         # the hash must depend only on the name, not on what follows it
         buf2 = Vector{UInt8}(codeunits(name * ";-45.6\nZagreb;1.0\n"))
         append!(buf2, zeros(UInt8, 16))
-        nm2 = GC.@preserve buf2 scan_name(pointer(buf2), 0)
+        nm2 = scan_name(buf2, 1)
         @test nm == nm2
     end
     # distinct names, distinct hashes, over the real station list
     names = [s.name for s in load_stations()]
     hs = map(names) do name
         buf = Vector{UInt8}(codeunits(name * ";0.0\n")); append!(buf, zeros(UInt8, 16))
-        GC.@preserve buf scan_name(pointer(buf), 0).hash
+        scan_name(buf, 1).hash
     end
     @test length(unique(hs)) == length(names)
     # Collisions are expected and handled by probing; only a lot of them would
@@ -104,7 +104,7 @@ end
     total, worst = 0, 0
     for name in names
         buf = Vector{UInt8}(codeunits(name * ";0.0\n")); append!(buf, zeros(UInt8, 16))
-        h = GC.@preserve buf scan_name(pointer(buf), 0).hash
+        h = scan_name(buf, 1).hash
         i = Int(h & OneBRC.TABLE_MASK) + 1
         d = 0
         while occupied[i]
@@ -128,12 +128,9 @@ end
     a = Vector{UInt8}(codeunits(long1 * "\n" * long2 * "\n" * long1 * "\n"))
     append!(a, zeros(UInt8, 16))
     n = ncodeunits(long1)
-    GC.@preserve a begin
-        p = pointer(a)
-        @test name_tail_eq(p, 0, 2n + 2, n)      # long1 vs long1
-        @test !name_tail_eq(p, 0, n + 1, n)      # long1 vs long2
-        @test name_tail_eq(p, n + 1, n + 1, n)   # reflexive
-    end
+    @test name_tail_eq(a, 1, 2n + 3, n)      # long1 vs long1
+    @test !name_tail_eq(a, 1, n + 2, n)      # long1 vs long2
+    @test name_tail_eq(a, n + 2, n + 2, n)   # reflexive
 end
 
 @testset "rounding and formatting" begin
@@ -157,27 +154,24 @@ end
     text = join(["st$i;$(i % 10).$(i % 10)" for i in 1:5000], "\n") * "\n"
     buf = Vector{UInt8}(codeunits(text)); append!(buf, zeros(UInt8, 16))
     n = length(codeunits(text))
-    GC.@preserve buf begin
-        p = pointer(buf)
-        @test segment_start(p, 1, n) == 0
-        # every segment boundary must land immediately after a newline
-        for seg in 2:10
-            s = segment_start(p, seg, n)
-            @test s == n || (s > 0 && buf[s] == UInt8('\n'))
-        end
-        @test next_row_start(p, 0, n) == findfirst(==(UInt8('\n')), buf)
-        @test next_row_start(p, n - 1, n) == n
+    @test segment_start(buf, 1, n) == 1
+    # every segment boundary must land immediately after a newline
+    for seg in 2:10
+        s = segment_start(buf, seg, n)
+        @test s == n || (s > 1 && buf[s - 1] == UInt8('\n'))
     end
+    @test next_row_start(buf, 1, n) == findfirst(==(UInt8('\n')), buf) + 1
+    @test next_row_start(buf, n, n) == n
 end
 
 @testset "fast/slow region split" begin
     small = Vector{UInt8}(codeunits("a;1.0\n"))
-    @test fast_region_end(small, length(small)) == 0    # everything is tail
+    @test fast_region_end(small, length(small)) == 1    # everything is tail
     big = Vector{UInt8}(codeunits(repeat("station;12.3\n", 20_000)))
     n = length(big)
     fend = fast_region_end(big, n)
-    @test 0 < fend <= n - TAIL_SLACK + OneBRC.MAX_ROW_BYTES
-    @test big[fend] == UInt8('\n')                       # lands on a row boundary
+    @test 1 < fend <= n - TAIL_SLACK + OneBRC.MAX_ROW_BYTES
+    @test big[fend - 1] == UInt8('\n')                   # lands on a row boundary
 end
 
 @testset "end to end against the reference" begin
@@ -239,14 +233,11 @@ end
         buf = take!(io)
         append!(buf, zeros(UInt8, 16))
         tbl = Table()
-        GC.@preserve buf begin
-            p = pointer(buf)
-            pos = 0
-            for _ in 1:n
-                nm = scan_name(p, pos)
-                update!(tbl, p, pos, nm, Int64(10))
-                pos = nm.stop + 6         # ";1.0\n"
-            end
+        pos = 1
+        for _ in 1:n
+            nm = scan_name(buf, pos)
+            update!(tbl, buf, pos, nm, Int64(10))
+            pos = nm.stop + 6             # ";1.0\n"
         end
         return tbl
     end
@@ -257,18 +248,6 @@ end
     @test OneBRC.MAX_ENTRIES >= 10_000
 end
 
-@testset "the safe implementation agrees with the unsafe one" begin
-    # OneBRC.Safe reimplements the pipeline without pointers, llvmcall or
-    # @inbounds. It exists to be measured against, so it has to stay correct.
-    for sample in sort(filter(f -> endswith(f, ".txt"), readdir(SAMPLES; join = true)))
-        @test format_result(run_file(sample)) ==
-              format_result(OneBRC.Safe.run_file(sample))
-    end
-    path = joinpath(SCRATCH, "safe_gen.txt")
-    generate(path, 300_000; seed = 12)
-    @test format_result(run_file(path)) == format_result(OneBRC.Safe.run_file(path))
-end
-
 @testset "the hot path does not allocate" begin
     path = joinpath(SCRATCH, "alloc.txt")
     generate(path, 200_000; seed = 4)
@@ -276,13 +255,10 @@ end
     append!(data, zeros(UInt8, 64))
     n = something(findlast(==(UInt8('\n')), data))
     tbl = Table()
-    GC.@preserve data begin
-        p = pointer(data)
-        OneBRC.process_segment!(tbl, p, 0, n)          # warm up / compile
-        tbl2 = Table()
-        allocated = @allocated OneBRC.process_segment!(tbl2, p, 0, n)
-        @test allocated == 0
-    end
+    OneBRC.process_segment!(tbl, data, 1, n)           # warm up / compile
+    tbl2 = Table()
+    allocated = @allocated OneBRC.process_segment!(tbl2, data, 1, n)
+    @test allocated == 0
 end
 
 end

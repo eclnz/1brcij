@@ -9,6 +9,11 @@ Load-bearing assumptions, all from the challenge spec: little-endian; values of
 the form `-?d?d.d`; names under 100 bytes with no `';'` or newline; well-formed,
 newline-terminated rows.
 
+The hot path is ordinary Julia — `Vector{UInt8}` indexing under `@inbounds`,
+not raw pointers. Two places step outside it, each documented where it appears:
+`match16` (an LLVM intrinsic Julia cannot otherwise spell) and one `unsafe_load`
+in `finish_row!` (a load LLVM will not emit from safe code).
+
 `@inbounds` is written out as well, since `--check-bounds=no` is a startup flag
 and unavailable to a PackageCompiler app.
 """
@@ -40,15 +45,15 @@ below it stay inside the mapping. Returns 0 if the window holds no boundary,
 sending everything down the slow path — only reachable on malformed input.
 """
 function fast_region_end(data::Vector{UInt8}, fsize::Int)
-    fsize <= TAIL_SLACK && return 0
+    fsize <= TAIL_SLACK && return 1
     from = fsize - TAIL_SLACK
     stop = min(from + MAX_ROW_BYTES, fsize)
-    p = from
-    @inbounds while p < stop
-        data[p + 1] == NEWLINE && return p + 1
-        p += 1
+    i = from
+    @inbounds while i < stop
+        data[i] == NEWLINE && return i + 1
+        i += 1
     end
-    return 0
+    return 1
 end
 
 """Aggregate one measurements file. Statistics are in tenths of a degree."""
@@ -58,21 +63,14 @@ function run_file(path::AbstractString)
         fsize = Int(filesize(io))
         fsize == 0 && return Dict{String,Stat}()
         data = Mmap.mmap(io, Vector{UInt8}, fsize)
-        # Not optional: `data` is otherwise dead while pointers into it live on.
-        return GC.@preserve data begin
-            base = pointer(data)
-            fend = fast_region_end(data, fsize)
-            stats = merge_tables(scan_parallel(base, fend), base)
-            accumulate_slow!(stats, data, fend, fsize)
-            stats
-        end
+        fend = fast_region_end(data, fsize)
+        stats = merge_tables(scan_parallel(data, fend), data)
+        accumulate_slow!(stats, data, fend - 1, fsize)
+        return stats
     finally
         close(io)
     end
 end
-
-# Defined after run_file so the submodule can import the constants above it.
-include("safe.jl")
 
 const USAGE = """
 usage: brc [options] <measurements file>
@@ -149,13 +147,10 @@ function _precompile_workload()
     data = take!(rows)
     stop = something(findlast(==(NEWLINE), data))
     append!(data, zeros(UInt8, 64))
-    stats = GC.@preserve data begin
-        p = pointer(data)
-        tbl = Table()
-        process_segment!(tbl, p, 0, stop)
-        scan_serial!(tbl, p, 0, stop)
-        merge_tables([tbl], p)
-    end
+    tbl = Table()
+    process_segment!(tbl, data, 1, stop)
+    scan_serial!(tbl, data, 1, stop)
+    stats = merge_tables([tbl], data)
     accumulate_slow!(stats, data, 0, stop)
     fast_region_end(data, stop)
     format_result(stats)
@@ -169,7 +164,7 @@ if ccall(:jl_generating_output, Cint, ()) == 1
     precompile(main, (Vector{String},))
     precompile(julia_main, ())
     precompile(baseline, (String,))
-    precompile(scan_parallel, (Ptr{UInt8}, Int))
+    precompile(scan_parallel, (Vector{UInt8}, Int))
 end
 
 end # module
