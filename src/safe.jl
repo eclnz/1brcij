@@ -1,14 +1,14 @@
 """
     OneBRC.Safe
 
-The same algorithm without any of the unsafe machinery: no `unsafe_load`, no raw
-pointers, no `llvmcall`, no `@inbounds`, and bounds checking left on. Kept to
-measure what the unsafe version actually buys.
+The same algorithm in ordinary Julia: `Vector{UInt8}` indexing rather than raw
+pointers, and no `unsafe_load` or `llvmcall`. `@inbounds` is used as any Julia
+program would. Kept to measure what the pointer machinery actually buys.
 
-Two optimisations have no safe equivalent and are simply absent: the 16-byte
-`vpcmpeqb` delimiter scan and the table prefetch. Everything else — the segment
-queue, the five pipelined cursors, SWAR scanning, the branchless value parse and
-the cache-line-packed table — carries over unchanged.
+Two optimisations need `llvmcall` and are simply absent: the 16-byte `vpcmpeqb`
+delimiter scan and the table prefetch. Everything else — the segment queue, the
+five pipelined cursors, SWAR scanning, the branchless value parse and the
+cache-line-packed table — carries over unchanged.
 """
 module Safe
 
@@ -21,9 +21,12 @@ using ..OneBRC: Stat, combine, TABLE_BITS, TABLE_SIZE, TABLE_MASK, MAX_ENTRIES,
 
 # 1-based indices throughout, unlike the pointer version's 0-based offsets.
 
-"""Little-endian 8-byte load, assembled from bytes so it stays bounds checked."""
+"""
+Little-endian 8-byte load from a byte vector. LLVM widens the shift-and-or
+pattern back into a single `mov`, so this costs exactly what `unsafe_load` does.
+"""
 @inline function load8(d::Vector{UInt8}, i::Int)
-    return UInt64(d[i])       | UInt64(d[i + 1]) << 8  | UInt64(d[i + 2]) << 16 |
+    @inbounds return UInt64(d[i])  | UInt64(d[i + 1]) << 8  | UInt64(d[i + 2]) << 16 |
            UInt64(d[i + 3]) << 24 | UInt64(d[i + 4]) << 32 | UInt64(d[i + 5]) << 40 |
            UInt64(d[i + 6]) << 48 | UInt64(d[i + 7]) << 56
 end
@@ -115,7 +118,7 @@ end
 @inline function update!(t::Table, d::Vector{UInt8}, pos::Int, name::Name, v::Int64)
     vb = UInt64(v + TEMP_BIAS)
     idx = Int(name.hash & TABLE_MASK)
-    while true
+    @inbounds while true
         b = SLOTS * idx + 1
         acc = t.w[b + 3]
         if acc == 0
@@ -165,7 +168,7 @@ end
 end
 
 @inline function next_row_start(d::Vector{UInt8}, i::Int, limit::Int)
-    while i < limit && d[i] != NEWLINE
+    @inbounds while i < limit && d[i] != NEWLINE
         i += 1
     end
     return i < limit ? i + 1 : limit
@@ -226,7 +229,7 @@ end
 
 function merge_tables(tables, d::Vector{UInt8})
     out = Dict{String,Stat}()
-    for t in tables, i in 0:(TABLE_SIZE - 1)
+    @inbounds for t in tables, i in 0:(TABLE_SIZE - 1)
         acc = t.w[SLOTS * i + 4]
         acc == 0 && continue
         a = t.off[i + 1]
@@ -246,7 +249,7 @@ function fast_region_end(d::Vector{UInt8}, fsize::Int)
     from = fsize - TAIL_SLACK
     stop = min(from + MAX_ROW_BYTES, fsize)
     i = from
-    while i < stop
+    @inbounds while i < stop
         d[i] == NEWLINE && return i + 1
         i += 1
     end

@@ -1,11 +1,10 @@
 #!/usr/bin/env julia
-# What the unsafe machinery is worth.
+# What the pointer machinery is worth against ordinary Julia.
 #
-#   julia -t auto -O3 --check-bounds=no scripts/safety.jl <file>   # unsafe, and safe unchecked
-#   julia -t auto -O3 scripts/safety.jl <file>                     # safe, checked
+#   julia -t auto -O3 --check-bounds=no scripts/safety.jl <file>
 #
-# Run it both ways: --check-bounds=no is a startup flag, so a single process
-# cannot measure checked and unchecked code side by side.
+# Run it without the flag too: src/safe.jl carries its own @inbounds, so the two
+# should agree, which is the check that the annotations cover the hot path.
 include(joinpath(@__DIR__, "..", "src", "OneBRC.jl"))
 using .OneBRC, Printf
 
@@ -14,7 +13,7 @@ function main(path)
     checked = Base.JLOptions().check_bounds != 2      # 2 == --check-bounds=no
     @assert OneBRC.format_result(OneBRC.run_file(path)) ==
             OneBRC.format_result(OneBRC.Safe.run_file(path))
-    for (label, f) in (("unsafe", OneBRC.run_file), ("safe", OneBRC.Safe.run_file))
+    for (label, f) in (("pointers", OneBRC.run_file), ("ordinary", OneBRC.Safe.run_file))
         f(path)
         best = Inf
         for _ in 1:7

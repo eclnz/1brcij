@@ -20,12 +20,12 @@ EPYC 7502P; its sequential baseline, 4:49.
 | `src/scan.jl` | mmap segmentation, work queue, pipelined scan cursors |
 | `src/output.jl` | half-up rounding and the challenge's output format |
 | `src/reference.jl` | the slow oracle everything is diffed against |
-| `src/safe.jl` | the same algorithm with no unsafe operations, for comparison |
+| `src/safe.jl` | the same algorithm in ordinary Julia, for comparison |
 | `src/generate.jl` | measurement file generator |
 | `bin/brc.jl` | CLI — `--check` diffs against the oracle, `--time` reports wall time |
 | `scripts/bench.jl` | steady-state timing, compilation excluded |
 | `scripts/inspect.jl` | type stability, zero-allocation and codegen checks |
-| `scripts/safety.jl` | unsafe against safe, checked and unchecked |
+| `scripts/safety.jl` | pointers and intrinsics against ordinary Julia |
 | `test/samples/` | the twelve official 1BRC samples and expected outputs |
 | `benchmark.sh` | the whole run in one command |
 | `prepare.sh` `calculate_average.sh` `test.sh` `create_measurements.sh` `evaluate.sh` | the 1BRC harness scripts |
@@ -100,26 +100,32 @@ Things that measured *worse* and were dropped: branchless min/max, a 24-byte
 inline key, fusing count/min/max into one word, and `MADV_POPULATE_READ`. Three
 of the four reduced operation counts at the cost of parallelism.
 
-### What the unsafe machinery buys
+### What the pointer machinery buys
 
-`src/safe.jl` is the same algorithm with no `unsafe_load`, no raw pointers, no
-`llvmcall` and no `@inbounds`. 1e8 rows, four cores, best of seven:
+`src/safe.jl` is the same algorithm in ordinary Julia — `Vector{UInt8}` indexing
+instead of raw pointers, no `unsafe_load`, no `llvmcall`, and `@inbounds` used
+as any Julia program would. 1e8 rows, four cores, best of seven, three runs:
 
 | | 413 stations | 10 000 stations |
 |:--|--:|--:|
-| unsafe, checks off (shipped) | 0.274 s | 0.387 s |
-| safe, checks off | 0.404 s | 0.534 s |
-| safe, bounds checked | 0.546 s | 0.705 s |
+| pointers and intrinsics (shipped) | 0.268 s | 0.377 s |
+| ordinary Julia | 0.415 s | 0.546 s |
+| | **1.55×** | **1.45×** |
 
-**Pure safe Julia costs about 2×**, split roughly evenly between the two
-intrinsics that have no safe equivalent — the 16-byte `vpcmpeqb` scan and the
-table prefetch — and bounds checking.
+Two of the ingredients turn out to be free:
 
-What it does *not* cost is the pointer arithmetic. `unsafe_load` buys nothing
-here: assembling a `UInt64` from eight `Vector{UInt8}` indexes compiles to a
-single `mov rax, qword ptr [rax + rsi - 1]`, identical to the pointer version,
-because LLVM widens the byte loads. So the unsafe code is worth having for the
-intrinsics it unlocks and for eliding bounds checks, not for the addressing.
+**`unsafe_load` buys nothing.** Assembling a `UInt64` from eight
+`Vector{UInt8}` indexes compiles to a single `mov rax, qword ptr [rax + rsi - 1]`
+— the identical instruction — because LLVM widens the shift-and-or pattern.
+
+**Bounds checks cost nothing either**, given `@inbounds`. The safe version times
+the same with and without `--check-bounds=no`, which is what you want to see:
+the annotations cover the hot path.
+
+So the 1.5× is what `llvmcall` unlocks — the 16-byte `vpcmpeqb` delimiter scan
+and the table prefetch, neither reachable from ordinary Julia — plus whatever
+the array-object indirection costs against a pointer held in a register. Those
+two are not cleanly separable here.
 
 `scripts/safety.jl` reproduces the table; `test/runtests.jl` holds the two
 implementations to identical output.
