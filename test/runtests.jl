@@ -9,6 +9,7 @@ using .OneBRC: match_bytes, tail_mask, scan_name, parse_value, parse_tenths,
                accumulate_slow!, load_stations, generate, run_file
 
 const SCRATCH = mktempdir()
+const SAMPLES = joinpath(@__DIR__, "samples")
 
 @testset "OneBRC" begin
 
@@ -254,6 +255,18 @@ end
     @test_throws ErrorException fill_table(OneBRC.MAX_ENTRIES + 1)
     # The cap must leave room for the station set the challenge permits.
     @test OneBRC.MAX_ENTRIES >= 10_000
+end
+
+@testset "the safe implementation agrees with the unsafe one" begin
+    # OneBRC.Safe reimplements the pipeline without pointers, llvmcall or
+    # @inbounds. It exists to be measured against, so it has to stay correct.
+    for sample in sort(filter(f -> endswith(f, ".txt"), readdir(SAMPLES; join = true)))
+        @test format_result(run_file(sample)) ==
+              format_result(OneBRC.Safe.run_file(sample))
+    end
+    path = joinpath(SCRATCH, "safe_gen.txt")
+    generate(path, 300_000; seed = 12)
+    @test format_result(run_file(path)) == format_result(OneBRC.Safe.run_file(path))
 end
 
 @testset "the hot path does not allocate" begin

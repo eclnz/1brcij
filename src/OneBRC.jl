@@ -71,6 +71,9 @@ function run_file(path::AbstractString)
     end
 end
 
+# Defined after run_file so the submodule can import the constants above it.
+include("safe.jl")
+
 const USAGE = """
 usage: brc [options] <measurements file>
 
