@@ -107,15 +107,16 @@ of the four reduced operation counts at the cost of parallelism.
 
 ### Ordinary Julia, and what the intrinsics buy
 
-The hot path is `Vector{UInt8}` indexing under `@inbounds`, not raw pointers.
-It got there from a pointer implementation, so the cost of each step back is
-measured. 1e8 rows, four cores, best of seven, three paired runs:
+The hot path is `Vector{UInt8}` indexing under `@inbounds` — no raw pointers, no
+`unsafe_load`, no `GC.@preserve`. It got there from a pointer implementation, so
+the cost of each step back is measured. 1e8 rows, four cores, best of seven,
+three paired runs:
 
 | | 413 stations | 10 000 stations |
 |:--|--:|--:|
 | raw pointers throughout | 0.271 s | 0.373 s |
 | ordinary Julia (shipped) | 0.283 s | 0.408 s |
-| — without the widened value load | 0.325 s | 0.452 s |
+| — with the value load unwidened | 0.325 s | 0.452 s |
 | — without `match16` either | 0.415 s | 0.546 s |
 
 At 1e9 rows the scan itself is 3.5% off the pointer implementation and the whole
@@ -126,20 +127,17 @@ thread scaling.
 with and without `--check-bounds=no`, which is what you want to see: the
 annotations cover the hot path.
 
-**Assembling a `UInt64` from eight indexes is usually free.** LLVM folds the
-shift-and-or chain back into one unaligned `mov` — the same instruction
-`unsafe_load` emits. Usually: `parse_value` splits its word into a narrow use
-(finding the `.`) and a wide one (the digit multiply), and LLVM then
-reassociates the chain to serve the narrow half instead of folding it, leaving
-eight `movzx` per row. That one site is 13%, and is the only `unsafe_load` left.
-Three different spellings of the load produce identical code, so it is the
-consumer, not the load.
+**Assembling a `UInt64` from eight indexes is free, but only if you ask for all
+eight.** LLVM folds the shift-and-or chain back into one unaligned `mov` — the
+same instruction `unsafe_load` emits — and will not when the consumer needs less
+than the whole word. That is why `parse_value` finds the sign and the decimal
+point with a single mask over all eight bytes rather than two narrow ones:
+worth 13%.
 
 **`match16` is worth 22%**, and is the one thing here that reduces work per row
 rather than misses per row. `vpcmpeqb` has no portable spelling in Julia, hence
-the `llvmcall`. Passing the two words by value rather than by address keeps it
-off raw pointers — and reads the 16 bytes once, where the pointer version read
-them twice, once as a vector and once as two scalars.
+the `llvmcall`; passing the two words by value rather than by address keeps it
+off raw pointers.
 
 **The prefetch did not survive the move.** Explicit table prefetching is worth
 2% at 10 000 stations and costs 6% at 413, where the table already sits in L2 —

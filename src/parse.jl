@@ -111,7 +111,8 @@ end
 
 # Int64 rather than UInt64 so the signed arithmetic below never hits a mixed
 # signed/unsigned promotion.
-const DOT_BITS   = 0x0000000010101000        # bit 4 of bytes 1, 2 and 3
+const LOW_BITS   = 0x1010101010101010        # bit 4 of every byte
+const SIGN_MARK  = 0x0000000000000010        # ... of byte 0, i.e. a leading '-'
 const SIGN_BYTE  = Int64(0x00000000000000ff)
 const DIGIT_MASK = Int64(0x0000000f000f0f00)
 const DIGIT_MUL  = Int64(0x00000000640a0001) # 100<<24 | 10<<16 | 1
@@ -123,15 +124,21 @@ const ABS_MASK   = Int64(0x00000000000003ff)
 Parse `-?d?d.d\\n` from one 8-byte load with no branches (the merykitty trick),
 returning tenths and the bytes consumed.
 
-`'.'` and `'-'` have bit 4 clear where digits have it set, which locates both
-without comparing. The shift by `28 - dot` aligns the digits whatever the
-layout, `DIGIT_MUL` sums `100d₁ + 10d₂ + d₃` in one multiply, and
+`'.'` and `'-'` have bit 4 clear where digits have it set, so one mask over all
+eight bytes marks both: bit 4 of byte 0 iff the value is negative, and the
+lowest mark above it is the `'.'`. The shift by `28 - dot` aligns the digits
+whatever the layout, `DIGIT_MUL` sums `100d₁ + 10d₂ + d₃` in one multiply, and
 `(v ⊻ signed) - signed` negates without a branch.
+
+One mask, not two: a narrower one needs only the low four bytes, and LLVM then
+splits the `load8` feeding this into eight `movzx` to serve it rather than
+folding the shift-and-or chain into a single `mov`.
 """
 @inline function parse_value(word::UInt64)
     w = reinterpret(Int64, word)
-    dot = trailing_zeros(~word & DOT_BITS)                  # 12, 20 or 28
-    signed = (reinterpret(Int64, ~word) << 59) >> 63        # -1 if '-', else 0
+    marks = ~word & LOW_BITS                                # the '-' and the '.'
+    signed = -((reinterpret(Int64, marks) >> 4) & 1)        # -1 if '-', else 0
+    dot = trailing_zeros(marks & ~SIGN_MARK)                # 12, 20 or 28
     design = ~(signed & SIGN_BYTE)                          # zeroes the '-' lane
     digits = ((w & design) << (28 - dot)) & DIGIT_MASK
     absval = ((digits * DIGIT_MUL) >>> 32) & ABS_MASK

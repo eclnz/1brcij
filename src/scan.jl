@@ -46,10 +46,7 @@ end
 """Parse the value, accumulate, and return the index of the next row."""
 @inline function finish_row!(t::Table, data::Vector{UInt8}, pos::Int, name::Name)
     vstart = name.stop + 1
-    # The one place `load8` is not enough: `parse_value` splits the word into a
-    # narrow and a wide use, and LLVM then reassociates the shift-and-or chain
-    # rather than folding it into one `mov` — 8 `movzx` per row, ~15% end to end.
-    v, adv = parse_value(GC.@preserve data unsafe_load(Ptr{UInt64}(pointer(data, vstart))))
+    v, adv = parse_value(load8(data, vstart))
     update!(t, data, pos, name, v)
     return vstart + adv
 end

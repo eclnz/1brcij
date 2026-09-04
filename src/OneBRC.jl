@@ -9,10 +9,9 @@ Load-bearing assumptions, all from the challenge spec: little-endian; values of
 the form `-?d?d.d`; names under 100 bytes with no `';'` or newline; well-formed,
 newline-terminated rows.
 
-The hot path is ordinary Julia — `Vector{UInt8}` indexing under `@inbounds`,
-not raw pointers. Two places step outside it, each documented where it appears:
-`match16` (an LLVM intrinsic Julia cannot otherwise spell) and one `unsafe_load`
-in `finish_row!` (a load LLVM will not emit from safe code).
+The hot path is ordinary Julia — `Vector{UInt8}` indexing under `@inbounds`, no
+raw pointers and no `unsafe_load`. One `llvmcall` steps outside that, documented
+where it appears: `match16`, an instruction Julia cannot otherwise spell.
 
 `@inbounds` is written out as well, since `--check-bounds=no` is a startup flag
 and unavailable to a PackageCompiler app.
