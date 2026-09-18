@@ -1,0 +1,21 @@
+# julia 1.13.0, NIfTI.jl v0.6.3, Linux 6.18.44-fc-v33, ext4, read_ahead_kb=8192
+# generated 2026-09-18T03:02:25Z
+
+scenario           file MiB  wall s   read() MiB  disk MiB  ΔRSS MiB  majflt
+-----------------  --------  -------  ----------  --------  --------  ------
+eager_open           1800.0   1.0085     1800.06   1802.34   1800.01       1
+eager_voxels         1800.0    0.999     1800.06   1800.14   1800.01       0
+eager_sumall         1800.0   1.1754     1800.06   1802.34   1800.01       1
+mmap_open            1800.0   0.0012        0.09      2.46      0.06       1
+mmap_voxels          1800.0   0.1712        0.09    433.44      3.94      57
+mmap_timeseries      1800.0   0.6607        0.09   1802.34     25.01     400
+mmap_oneslice        1800.0   0.0042        0.09     10.34      0.14       2
+mmap_onevolume       1800.0   0.0053        0.09     14.34      9.51       1
+mmap_sumall          1800.0   0.6332        0.09   1802.34   1800.01       1
+mmap_voxels_rand     1800.0   0.0045        0.09      0.52      0.25      64
+mmap_tseries_rand    1800.0   0.0212        0.09      4.02      1.57     401
+gz_eager_voxels     1649.83  10.2192     1649.86   1650.11   1800.02       1
+gz_mmap_open        1649.83    0.001        0.06       2.6      0.01       2
+le_mmap_voxels         32.0   0.0256        0.09     32.27      3.47       6
+be_mmap_voxels         32.0   0.0132        0.09     32.27       3.5       6
+be_eager_voxels        32.0   0.0194       32.06     32.27      32.0       0
