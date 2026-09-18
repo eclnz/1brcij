@@ -128,9 +128,12 @@ element on access, so foreign-endian data costs nothing extra to map.
 
 ## Caveats
 
-- `ΔRSS` for the `_rand` rows is smaller than the page count implies because
-  `MADV_RANDOM` also disables fault-around; the 64 major faults in
-  `mmap_voxels_rand` map 64 single pages.
+- `ΔRSS` for the `_rand` rows is smaller than fault-around would suggest, but
+  `MADV_RANDOM` does not disable fault-around directly — fault-around only maps
+  pages already resident in the page cache, and with readahead off and a cold
+  cache there are none. So each access faults its own single page. That is also
+  why major faults rise from 57 to 64: without the 8 MiB window, no voxel lands
+  inside a neighbour's readahead any more.
 - The corpus is smooth-phantom data with noise, so `fmri.nii.gz` only
   compresses to 92%. Real images compress better, which makes the gzip read
   cheaper but does not change that it is all-or-nothing.
