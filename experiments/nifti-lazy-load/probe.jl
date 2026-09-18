@@ -22,37 +22,7 @@
 
 using NIfTI, Random, Mmap
 
-const PAGE = 4096
-
-function iocounters()
-    rchar = readb = 0
-    for line in eachline("/proc/self/io")
-        k, _, v = partition(line)
-        k == "rchar" && (rchar = v)
-        k == "read_bytes" && (readb = v)
-    end
-    return (rchar = rchar, read_bytes = readb)
-end
-
-function partition(line)
-    i = findfirst(==(':'), line)
-    i === nothing && return ("", "", 0)
-    return (line[1:i-1], ":", parse(Int, strip(line[i+1:end])))
-end
-
-rss() = parse(Int, split(read("/proc/self/statm", String))[2]) * PAGE
-
-function majflt()
-    s = read("/proc/self/stat", String)
-    fields = split(s[findlast(==(')'), s)+2:end])
-    return parse(Int, fields[10])   # majflt, shifted by the two fields before comm
-end
-
-function drop_caches()
-    run(`sync`)
-    write("/proc/sys/vm/drop_caches", "3")
-    return nothing
-end
+include(joinpath(@__DIR__, "counters.jl"))
 
 # ---------------------------------------------------------------- scenarios
 #

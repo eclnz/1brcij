@@ -126,6 +126,61 @@ and `le_mmap_voxels` are indistinguishable (3.5 MiB resident, ~0.09 MiB read),
 while the eager big-endian read takes the full 32 MiB. The swap happens per
 element on access, so foreign-endian data costs nothing extra to map.
 
+## 100 separate images
+
+The single-file numbers above answer "can I index into one big image". A cohort
+— 100 subjects, one voxel read from each — is a different question, and two
+things change. `generate_many.jl` writes 100 separate 256³ Int16 images
+(32 MiB each, 3.1 GiB total); `run_many.jl` drives `probe_many.jl` over them.
+
+```
+scenario        n    total MiB  wall s  read() MiB  disk MiB  ΔRSS MiB  majflt  Δfds
+--------------  ---  ---------  ------  ----------  --------  --------  ------  ----
+many_eager      100    3200.03  2.0701     3206.28   3200.78     25.37       0     1
+many_mmap       100    3200.03  0.3063        9.38    796.57      6.25     100   100
+many_mmap_rand  100    3200.03  0.0313        9.38     13.28      0.41     100   100
+many_mmap_held  100    3200.03  0.0371        9.38     13.28      0.41     100   100
+many_mmap_gc    100    3200.03  0.0639        9.38     13.28      0.41     100     0
+```
+
+**The headline result holds, and gets better.** 2.07 s and 3.2 GiB of reads
+becomes 0.031 s and 13 MiB — 66× faster, 241× less disk. Nothing about
+per-image laziness degrades when the images are separate files.
+
+**Memory stops being the argument; time never was more important.** `many_eager`
+ends at only 25 MiB resident, not 3.2 GiB, because each image is dropped after
+its voxel is read and the collector reclaims it. So "it won't fit in RAM" is
+*not* what goes wrong when you loop over a cohort one image at a time — you
+still read every byte of all 3.2 GiB, and that is where the 2 s goes. Judging
+this by peak RSS would have made the eager loop look fine.
+
+**Readahead now scales with the number of files.** `many_mmap` pulls 797 MiB
+off the disk — 100 files × one 8 MiB readahead window each — to deliver 6.25 MiB
+of pages. With one large file the waste was bounded by the file; across a
+cohort it is bounded by the file *count*, so `MADV_RANDOM` matters more here,
+not less. It is the difference between 0.31 s and 0.031 s.
+
+**New failure mode: NIfTI.jl never closes the file.** `niread` opens a stream
+and hands it to `Mmap.mmap` without closing it, on the eager path too (the
+`close(io)` calls in the package are in `niwrite`). Every mapped image costs a
+descriptor: `Δfds` is 100 for a 100-image cohort. That is invisible at this
+box's `ulimit -n` of 20000, but the common Linux default is 1024 and macOS
+ships 256, so a cohort loop dies partway through:
+
+```
+ERROR: SystemError: opening file ".../sub-045_T1w.nii": Too many open files
+```
+
+(that is 100 images under `ulimit -n 64`, failing at the 45th). The mapping
+itself does not need the descriptor — POSIX keeps the mapping valid once
+established — so the fix is just to let the finalizers run. `many_mmap_gc`
+calls `GC.gc()` every 25 images: descriptors return to baseline (`Δfds` 0), all
+100 mappings stay live and readable, and the same loop completes under
+`ulimit -n 64`. It costs 26 ms across the cohort.
+
+If you map images in a loop, collect periodically or raise the descriptor
+limit. Do not assume the pattern that worked for one image scales to a cohort.
+
 ## Caveats
 
 - `ΔRSS` for the `_rand` rows is smaller than fault-around would suggest, but
@@ -145,8 +200,10 @@ element on access, so foreign-endian data costs nothing extra to map.
 ## Reproducing
 
 ```bash
-julia --project generate.jl /path/to/scratch   # ~80 s, writes ~3.4 GiB
-julia --project run.jl      /path/to/scratch
+julia --project generate.jl      /path/to/scratch          # ~80 s, ~3.4 GiB
+julia --project run.jl           /path/to/scratch
+julia --project generate_many.jl /path/to/scratch/cohort 100   # ~3 s, ~3.1 GiB
+julia --project run_many.jl      /path/to/scratch/cohort
 ```
 
 `run.jl` drops the page cache between scenarios, so it needs to run as root;
